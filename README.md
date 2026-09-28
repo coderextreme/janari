@@ -14,3 +14,5 @@ bash run.sh ArchHalf
 bash run.sh BoxEm
 bash run.sh JinWink
 ````
+
+apologies that I can’t share my anari-java changes as AI code is incompatible with GPL
