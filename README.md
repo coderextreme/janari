@@ -11,5 +11,6 @@ To run:
 
 ```bash
  bash run.sh ArchHalf
- bash run.sh Box
+ bash run.sh BoxEm
+bash run.sh JinWink
 ````
