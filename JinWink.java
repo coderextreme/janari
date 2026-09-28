@@ -1,4 +1,3 @@
-package net.coderextreme.data;
 import org.web3d.x3d.jsail.*;
 import org.web3d.x3d.jsail.CADGeometry.*;
 import org.web3d.x3d.jsail.Core.*;
@@ -39,7 +38,6 @@ import org.web3d.x3d.jsail.VolumeRendering.*;
 import org.web3d.x3d.jsail.fields.*;
 import java.util.ArrayList;
 import java.util.List;
-import net.coderextreme.X3DRoots;
 public class JinWink implements X3DRoots {
   public static void main(String[] args) {
     ConfigurationProperties.setXsltEngine(ConfigurationProperties.XSLT_ENGINE_NATIVE_JAVA);
