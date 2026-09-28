@@ -1,4 +1,3 @@
-//  package net.coderextreme.data;
 import org.web3d.x3d.jsail.*;
 import org.web3d.x3d.jsail.CADGeometry.*;
 import org.web3d.x3d.jsail.Core.*;
@@ -39,7 +38,6 @@ import org.web3d.x3d.jsail.VolumeRendering.*;
 import org.web3d.x3d.jsail.fields.*;
 import java.util.ArrayList;
 import java.util.List;
-//  import net.coderextreme.X3DRoots;
 public class BoxEm implements X3DRoots {
   public static void main(String[] args) {
     ConfigurationProperties.setXsltEngine(ConfigurationProperties.XSLT_ENGINE_NATIVE_JAVA);
@@ -48,8 +46,8 @@ public class BoxEm implements X3DRoots {
     ConfigurationProperties.setStripDefaultAttributes(true);
     X3D model = new BoxEm().getRootNodeList().get(0); // only get one root node
     System.out.print(model.validationReport().trim());
-    model.toFileX3D("../data/BoxEm.new.java.x3d");
-    model.toFileJSON("../data/BoxEm.new.java.x3dj");
+    model.toFileX3D("BoxEm.new.java.x3d");
+    model.toFileJSON("BoxEm.new.java.x3dj");
     }
     public List<X3D> getRootNodeList() {
     	List<X3D> list = new ArrayList<X3D>(1);
@@ -66,15 +64,62 @@ ProtoInstance ProtoInstance3 = null;
         .addMeta(new meta().setName(new SFString("title")).setContent(new SFString("BoxEm.x3d")))
         .addMeta(new meta().setName(new SFString("creator")).setContent(new SFString("John Carlson")))
         .addMeta(new meta().setName(new SFString("generator")).setContent(new SFString("manual")))
-        .addMeta(new meta().setName(new SFString("identifier")).setContent(new SFString("https://coderextreme.net/X3DJSONLD/src/main/data/BoxEm.x3d")))
-        .addMeta(new meta().setName(new SFString("description")).setContent(new SFString("box"))))
+        .addMeta(new meta().setName(new SFString("identifier")).setContent(new SFString("https://coderextreme.net/X3DJSONLD/src/main/data/box.x3d")))
+        .addMeta(new meta().setName(new SFString("description")).setContent(new SFString("3 boxes"))))
       .setScene(new Scene()
         .addChild(new NavigationInfo().setType("\"EXAMINE\""))
         .addChild(new Viewpoint().setDescription(new SFString("Cubes on Fire")).setPosition(new float[] {0f ,0f ,12f }))
-        .addChild(new Shape().setDEF(new SFString("box"))
-         .setGeometry(new Box().setSize(new float[] {1f ,1f ,1f }))
-          .setAppearance(new Appearance()
-            .setMaterial(new Material().setDiffuseColor(new float[] {0f ,1f ,0f })))));
+        .addChild(new ProtoDeclare().setName(new SFString("anyShape"))
+          .setProtoInterface(new ProtoInterface()
+            .addField(new field().setType("SFVec3f").setName(new SFString("xtranslation")).setAccessType(field.ACCESSTYPE_INPUTOUTPUT).setValue(new SFString("0 0 0")))
+            .addField(new field().setType("MFNode").setName(new SFString("myShape")).setAccessType(field.ACCESSTYPE_INPUTOUTPUT)
+              .addChild(new Shape()
+                .setGeometry(new Sphere())
+                .setAppearance(new Appearance()
+                  .setMaterial(new Material().setDiffuseColor(new float[] {1f ,1f ,1f }))))))
+          .setProtoBody(new ProtoBody()
+            .addChild(new Transform()
+              .setIS(new IS()
+                .addConnect(new connect().setNodeField(new SFString("translation")).setProtoField(new SFString("xtranslation")))
+                .addConnect(new connect().setNodeField(new SFString("children")).setProtoField(new SFString("myShape")))))))
+        .addChild(new ProtoDeclare().setName(new SFString("three"))
+          .setProtoInterface(new ProtoInterface()
+            .addField(new field().setType("SFVec3f").setName(new SFString("ytranslation")).setAccessType(field.ACCESSTYPE_INPUTOUTPUT).setValue(new SFString("0 0 0")))
+            .addField(new field().setType("MFNode").setName(new SFString("myShape")).setAccessType(field.ACCESSTYPE_INPUTOUTPUT)
+              .addChild(new Shape()
+                .setGeometry(new Cylinder())
+                .setAppearance(new Appearance()
+                  .setMaterial(new Material().setDiffuseColor(new float[] {1f ,1f ,1f }))))))
+          .setProtoBody(new ProtoBody()
+            .addChild(new Transform()
+              .setIS(new IS()
+                .addConnect(new connect().setNodeField(new SFString("translation")).setProtoField(new SFString("ytranslation"))))
+              .addChild(ProtoInstance0 = new ProtoInstance().setName(new SFString("anyShape"))
+                .setIS(new IS()
+                  .addConnect(new connect().setNodeField(new SFString("myShape")).setProtoField(new SFString("myShape")))))
+              .addChild(ProtoInstance1 = new ProtoInstance().setName(new SFString("anyShape"))
+                .setIS(new IS()
+                  .addConnect(new connect().setNodeField(new SFString("myShape")).setProtoField(new SFString("myShape")))))
+              .addChild(ProtoInstance2 = new ProtoInstance().setName(new SFString("anyShape"))
+                .setIS(new IS()
+                  .addConnect(new connect().setNodeField(new SFString("myShape")).setProtoField(new SFString("myShape"))))))))
+        .addChild(ProtoInstance3 = new ProtoInstance().setName(new SFString("three")).setDEF(new SFString("threepi")))
+        .addChild(new Transform().setTranslation(new float[] {0f ,2f ,0f })
+          .addChild(new Shape().setUSE(new SFString("box")))));
+ProtoInstance0
+                .addFieldValue(new fieldValue().setName(new SFString("xtranslation")).setValue(new SFString("0 0 0")));
+ProtoInstance1
+                .addFieldValue(new fieldValue().setName(new SFString("xtranslation")).setValue(new SFString("2 0 0")));
+ProtoInstance2
+                .addFieldValue(new fieldValue().setName(new SFString("xtranslation")).setValue(new SFString("-2 0 0")));
+ProtoInstance3
+          .addFieldValue(new fieldValue().setName(new SFString("ytranslation")).setValue(new SFString("0 0 0")));
+ProtoInstance3
+          .addFieldValue(new fieldValue().setName(new SFString("myShape"))
+            .addChild(new Shape().setDEF(new SFString("box"))
+              .setGeometry(new Box().setSize(new float[] {1f ,1f ,1f }))
+              .setAppearance(new Appearance()
+                .setMaterial(new Material().setDiffuseColor(new float[] {0f ,1f ,0f })))));
     return X3D0;
     }
 }
