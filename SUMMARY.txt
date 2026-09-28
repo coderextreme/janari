@@ -1,0 +1,19 @@
+Summary of work done:
+1. Upgraded Java SDK to latest available in repositories (openjdk 25.0.4).
+2. Fixed Java NullPointerException in Array.set() by ensuring map() is called before writing when lastMapPointer is null.
+3. Modified AnariPane to use 'environment' library loader, allowing backend switching via ANARI_LIBRARY environment variable.
+4. Built latest ANARI SDK from source (https://github.com/khronosgroup/anari-sdk) with helide and helide_gpu devices.
+5. Verified helide device works with native C API (test program renders successfully).
+6. Built and tested VisRTX GL device (from https://github.com/NVIDIA/VisRTX) with Java bindings - works without crash (offscreen EGL context).
+7. Tested helide device with Java bindings - still crashes with SIGSEGV in anonymous memory (indicating Java bindings memory management issue).
+
+Working configurations:
+- Java bindings + VisGL device (VisRTX) - suitable for GTX 980 (OpenGL ES 3.2)
+- Native C API + helide device - works for rendering
+
+Non-working configuration:
+- Java bindings + helide/helide_gpu devices - crashes due to memory management issues in Java Foreign Function & Memory API interaction.
+
+Recommendation for GTX 980:
+- Use VisGL device via Java bindings for basic rendering (no lights/materials limitations of hecore).
+- For advanced rendering (path tracing, volumes, etc.), use native C API with helide device or consider fixing Java bindings.
