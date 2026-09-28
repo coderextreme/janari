@@ -1,6 +1,12 @@
 # janari
 Render X3DJSAIL apps with ANARI
 
+To build:
+
+Install:
+install ANARI-SDK-0.16.0/ in this folder
+install anari-java/ in this folder
+
 To run:
 
 ```bash
