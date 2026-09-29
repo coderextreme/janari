@@ -1,0 +1,86 @@
+## Copyright 2024-2026 The Khronos Group
+## SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.11)
+
+if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_LIST_DIR})
+  set(STANDALONE_SOURCE_TREE TRUE)
+else()
+  set(STANDALONE_SOURCE_TREE FALSE)
+endif()
+
+if (STANDALONE_SOURCE_TREE)
+  message(STATUS "CMake version: ${CMAKE_VERSION}")
+endif()
+
+## Language setup ##
+
+set(CMAKE_DISABLE_SOURCE_CHANGES ON)
+set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+set(CMAKE_BUILD_TYPE_INIT Release)
+
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
+set(CMAKE_INSTALL_MESSAGE LAZY)
+
+## Establish project ##
+
+project(anari_library_hecore LANGUAGES CXX)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+include(GNUInstallDirs)
+
+## Dependencies ##
+
+find_package(anari REQUIRED)
+
+
+## Build device target ##
+
+add_library(${PROJECT_NAME} SHARED
+  HeCoreDevice.cpp
+  HeCoreDeviceGlobalState.cpp
+  HeCoreLibrary.cpp
+  Object.cpp
+  camera/Camera.cpp
+  frame/Frame.cpp
+  geometry/Geometry.cpp
+  light/Light.cpp
+  material/Material.cpp
+  renderer/Renderer.cpp
+  sampler/Sampler.cpp
+  spatial_field/SpatialField.cpp
+  surface/Surface.cpp
+  volume/Volume.cpp
+  world/Group.cpp
+  world/Instance.cpp
+  world/World.cpp
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE anari::helium)
+
+include(GenerateExportHeader)
+generate_export_header(${PROJECT_NAME} EXPORT_MACRO_NAME "HECORE_EXPORT")
+
+target_include_directories(${PROJECT_NAME}
+PRIVATE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+)
+
+## Code generation ##
+
+anari_generate_queries(
+  DEVICE_TARGET ${PROJECT_NAME}
+  CPP_NAMESPACE hecore
+  JSON_DEFINITIONS_FILE ${CMAKE_CURRENT_SOURCE_DIR}/HeCoreDefinitions.json
+)

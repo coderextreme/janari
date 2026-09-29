@@ -1,0 +1,21 @@
+{
+    "info" : {
+        "name" : "KHR_DATA_PARALLEL_MPI",
+        "type" : "extension",
+        "dependencies" : []
+    },
+
+    "objects" : [
+        {
+            "type" : "ANARI_FRAME",
+            "parameters" : [
+                {
+                    "name" : "mpiCommunicator",
+                    "types" : ["ANARI_VOID_POINTER"],
+                    "tags" : [],
+                    "description" : "the MPI communicator which the device should treat as the MPI world (defaults to MPI_COMM_WORLD)"
+                }
+            ]
+        }
+    ]
+}
