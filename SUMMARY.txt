@@ -10,6 +10,7 @@ Summary of work done:
 Working configurations:
 - Java bindings + VisGL device (VisRTX) - suitable for GTX 980 (OpenGL ES 3.2)
 - Native C API + helide device - works for rendering
+- 2014 Intel Mac Air using Linux Mint
 
 Non-working configuration:
 - Java bindings + helide/helide_gpu devices - crashes due to memory management issues in Java Foreign Function & Memory API interaction.
