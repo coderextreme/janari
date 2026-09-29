@@ -28,6 +28,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -47,7 +48,19 @@ public class JanariApp extends Application {
             String raw = getParameters().getRaw().isEmpty() ? modelName : getParameters().getRaw().get(0);
             String which = raw.replaceAll("\\.(java|x3d|json)$", "");
 
-            X3DRoots roots;
+            X3DRoots roots = null;
+	    try {
+	        Class<?> clazz = Class.forName(which);
+	        roots = (X3DRoots)clazz.getDeclaredConstructor().newInstance();
+	        modelName = which;
+	    } catch (ClassNotFoundException e) {
+	        // class not on classpath
+	    } catch (NoSuchMethodException e) {
+	        // no matching constructor
+	    } catch (InstantiationException | IllegalAccessException | InvocationTargetException e) {
+	        // couldn't construct it
+	    }
+/*
             switch (which) {
                 case "ArchHalf":
                     roots = new ArchHalf();
@@ -69,6 +82,7 @@ public class JanariApp extends Application {
                     modelName = "BoxEm";
                     break;
             }
+*/
             System.out.println("Loading model: " + which);
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
             X3DAnariHandler handler = new X3DAnariHandler(x3dModel);
