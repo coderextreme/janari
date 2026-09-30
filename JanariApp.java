@@ -71,12 +71,10 @@ public class JanariApp extends Application {
             }
 
             if (roots == null) {
-                // System.err.println("Could not load class for: " + which + ". Falling back to BoxEm.");
                 roots = new net.coderextreme.data.BoxEm();
                 modelName = "net.coderextreme.data.BoxEm";
             }
 
-            // System.out.println("Loading model: " + modelName);
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
             X3DAnariHandler handler = new X3DAnariHandler(x3dModel);
             anariPane.setHandler(handler);
@@ -85,7 +83,6 @@ public class JanariApp extends Application {
                 try {
                     Method enableAnimMethod = anariPane.getClass().getMethod(mName, boolean.class);
                     enableAnimMethod.invoke(anariPane, true);
-                    // System.out.println("Configured AnariPane." + mName + "(true)");
                     break;
                 } catch (Exception ignored) {}
             }
@@ -101,7 +98,6 @@ public class JanariApp extends Application {
                         for (String mName : List.of("requestRender", "requestRepaint", "renderLater", "repaint", "render")) {
                             try {
                                 repaintMethod = anariPane.getClass().getMethod(mName);
-                                // System.out.println("Animation loop bound to: AnariPane." + mName + "()");
                                 break;
                             } catch (Exception ignored) {}
                         }
@@ -112,7 +108,6 @@ public class JanariApp extends Application {
                                     if (n.contains("render") || n.contains("repaint")) {
                                         m.setAccessible(true);
                                         repaintMethod = m;
-                                        // System.out.println("Animation loop bound to internal method: " + m.getName() + "()");
                                         break;
                                     }
                                 }
@@ -130,7 +125,6 @@ public class JanariApp extends Application {
                 }
             };
             animTimer.start();
-            // System.out.println("Continuous animation timer started.");
 
             StackPane root = new StackPane(anariPane);
             Scene scene = new Scene(root, 1024, 768);
@@ -184,7 +178,7 @@ class X3DAnariHandler extends AbstractHandler {
 
     private static final boolean FLIP_Y = true;
     private static final boolean SWAP_RED_BLUE = true;
-    private static final boolean SRGB_ENCODE_COLORS = true;
+    private static final boolean SRGB_ENCODE_COLORS = false;
     private float angleScale = 1f;
     private float lastAz = Float.NaN, lastEl = Float.NaN;
     private boolean built = false;
@@ -208,12 +202,11 @@ class X3DAnariHandler extends AbstractHandler {
     private final Map<String, OrientationInterpolatorAnim> orientationInterpolators = new HashMap<>();
     private final Map<String, PositionInterpolatorAnim> positionInterpolators = new HashMap<>();
     private final Map<String, DisplacerAnim> displacers = new HashMap<>();
+    private final Map<String, TextureTransformAnim> textureTransforms = new HashMap<>();
     private final List<DisplacerMeshBinding> activeBindings = new ArrayList<>();
     private final List<SkinMeshBinding> skinBindings = new ArrayList<>();
+    private final List<TextureTransformBinding> textureBindings = new ArrayList<>();
 
-    // HAnim joint state used for CPU skinning. HAnimJoint centers are
-    // retained exactly as authored and ROUTE animation replaces rotation/
-    // translation fields just as set_rotation/set_translation would.
     private final Map<String, JointAnim> joints = new HashMap<>();
     private final Deque<JointAnim> jointStack = new ArrayDeque<>();
 
@@ -229,8 +222,6 @@ class X3DAnariHandler extends AbstractHandler {
     public void initialize(Device device) {
         super.initialize(device);
         this.device = device;
-        // System.out.println("initialize(Device): world=" + world + " renderer=" + renderer
-          //                  + " camera=" + camera + " frame=" + frame);
     }
 
     @Override
@@ -238,7 +229,6 @@ class X3DAnariHandler extends AbstractHandler {
         super.updateScene(state);
         if (!built && device != null && world != null) {
             built = true;
-            // System.out.println("--- Building Janari scene ---");
             try {
                 build(device);
             } catch (Throwable t) {
@@ -257,9 +247,6 @@ class X3DAnariHandler extends AbstractHandler {
         frameCount++;
         boolean meshUpdated = false;
 
-        float lastFrac = 0f;
-        float lastWeight = 0f;
-
         for (TimeSensorAnim ts : timeSensors) {
             if (!ts.enabled || !ts.isRunning) continue;
 
@@ -271,22 +258,22 @@ class X3DAnariHandler extends AbstractHandler {
             float frac = ts.loop
                 ? (float) ((nowSec % ts.cycleInterval) / ts.cycleInterval)
                 : (float) Math.min(1.0, nowSec / ts.cycleInterval);
-            lastFrac = frac;
 
-            // X3D ROUTE evaluation:
-            // TimeSensor.fraction_changed -> Interpolator.set_fraction
-            // Interpolator.value_changed -> target field.
             for (X3DRoute r : routes) {
                 if (!r.fromNode.equals(ts.def) || !"fraction_changed".equals(r.fromField)) continue;
 
                 ScalarInterpolatorAnim si = interpolators.get(r.toNode);
                 if (si != null) {
                     float weight = si.evaluate(frac);
-                    lastWeight = weight;
                     for (X3DRoute r2 : routes) {
                         if (r2.fromNode.equals(si.def) && "value_changed".equals(r2.fromField)) {
                             DisplacerAnim da = displacers.get(r2.toNode);
                             if (da != null) da.currentWeight = weight;
+
+                            TextureTransformAnim tt = textureTransforms.get(r2.toNode);
+                            if (tt != null && ("rotation".equals(r2.toField) || "set_rotation".equals(r2.toField))) {
+                                tt.rotation = weight;
+                            }
                         }
                     }
                 }
@@ -329,15 +316,16 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        for (TextureTransformBinding ttb : textureBindings) {
+            if (ttb.apply(device)) {
+                meshUpdated = true;
+            }
+        }
+
         if (meshUpdated && world != null) {
             try {
                 world.commit();
             } catch (Throwable ignored) {}
-        }
-
-        if (frameCount % 30 == 0) {
-            // System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | joints=%d | skinBindings=%d | displacerBindings=%d%n",
-               //                nowSec, lastFrac, lastWeight, joints.size(), skinBindings.size(), activeBindings.size());
         }
     }
 
@@ -380,20 +368,13 @@ class X3DAnariHandler extends AbstractHandler {
         sceneArena.close();
     }
 
-    // ------------------------------------------------------------------
-
     private void build(Device device) throws Throwable {
-        long t0 = System.currentTimeMillis();
         float[] gray = displayColor(0.8f, 0.8f, 0.8f);
         defaultMaterial = device.newMaterial(Material.SubType.MATTE).setColor(gray[0], gray[1], gray[2]);
         defaultMaterial.commit();
         keepAlive.add(defaultMaterial);
 
-        // System.out.println("Scanning scene tree for DEFs, Protos, and Animation nodes...");
         buildCache(x3dModel);
-        long tCache = System.currentTimeMillis() - t0;
-        // System.out.println("Cache built in " + tCache + " ms: found " + defMap.size()
-        //                   + " DEFs, " + protoMap.size() + " Protos, " + displacers.size() + " Displacers, " + routes.size() + " ROUTEs.");
 
         float[] identity = { 1,0,0,0, 0,(FLIP_Y ? -1 : 1),0,0, 0,0,1,0, 0,0,0,1 };
         Object scene = null;
@@ -407,13 +388,9 @@ class X3DAnariHandler extends AbstractHandler {
             float cx = (bmin[0] + bmax[0]) / 2, cy = (bmin[1] + bmax[1]) / 2, cz = (bmin[2] + bmax[2]) / 2;
             float dx = bmax[0] - bmin[0], dy = bmax[1] - bmin[1], dz = bmax[2] - bmin[2];
             float radius = 0.5f * (float) Math.sqrt(dx*dx + dy*dy + dz*dz);
-            // System.out.printf("Scene bounds: min=[%.2f, %.2f, %.2f] max=[%.2f, %.2f, %.2f]%n",
-              //                 bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
             if (!viewpointSet) {
                 cameraTarget = new float[] { cx, cy, cz };
                 cameraDistance = Math.max(radius * 2.5f, 1f);
-                // System.out.printf("Auto-framing camera: target=[%.2f, %.2f, %.2f] distance=%.2f%n",
-                  //                 cx, cy, cz, cameraDistance);
             }
         }
 
@@ -425,7 +402,7 @@ class X3DAnariHandler extends AbstractHandler {
             try {
                 renderer.setFloat32("ambientRadiance", AMBIENT_RADIANCE);
                 renderer.set("background", DataType.FLOAT32_VEC4,
-                             sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, 0.05f, 0.05f, 0.07f, 1f));
+                             sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, 0f, 0f, 0f, 1f));
                 renderer.commit();
             } catch (Throwable t) { t.printStackTrace(); }
         }
@@ -447,14 +424,7 @@ class X3DAnariHandler extends AbstractHandler {
         keepAlive.add(lightArray);
 
         world.commit();
-
-        // System.out.printf("Animation initialized: %d TimeSensors, %d Interpolators, %d Displacers, %d ROUTEs, %d Bindings%n",
-          //                 timeSensors.size(), interpolators.size(), displacers.size(), routes.size(), activeBindings.size());
-        // System.out.println("--- Janari Load Complete: " + anariInstances.size() + " shape instances in world ---");
     }
-
-    // ------------------------------------------------------------------
-    // Fast, targeted X3D hierarchy cache
 
     private void buildCache(Object node) {
         if (node == null || !visited.add(node)) return;
@@ -477,8 +447,6 @@ class X3DAnariHandler extends AbstractHandler {
             boolean loop = extractBoolean(node, "getLoop", false);
             TimeSensorAnim ts = new TimeSensorAnim(def, interval, loop, enabled);
             timeSensors.add(ts);
-            // System.out.printf("TimeSensor '%s' parsed: enabled=%b, loop=%b, cycleInterval=%.2fs%n",
-              //                 def, enabled, loop, interval);
         }
 
         if (cName.contains("ScalarInterpolator") && def != null) {
@@ -513,6 +481,14 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        if (cName.contains("TextureTransform") && def != null) {
+            float[] center = extractFloatArray(node, "getCenter");
+            float rot = (float) extractDouble(node, "getRotation", 0.0);
+            float[] scale = extractFloatArray(node, "getScale");
+            float[] trans = extractFloatArray(node, "getTranslation");
+            textureTransforms.put(def, new TextureTransformAnim(def, center, rot, scale, trans));
+        }
+
         if (cName.contains("ROUTE")) {
             String fNode = extractString(node, "getFromNode");
             String fField = extractString(node, "getFromField");
@@ -539,6 +515,7 @@ class X3DAnariHandler extends AbstractHandler {
         tryInvokeAndCache(node, "getGeometry");
         tryInvokeAndCache(node, "getMaterial");
         tryInvokeAndCache(node, "getTexture");
+        tryInvokeAndCache(node, "getTextureTransform");
         tryInvokeAndCache(node, "getCoord");
         tryInvokeAndCache(node, "getTexCoord");
         tryInvokeAndCache(node, "getColor");
@@ -713,9 +690,11 @@ class X3DAnariHandler extends AbstractHandler {
 
         if (cName.contains("Background")) {
             try {
-                float[] sky = (float[]) node.getClass().getMethod("getSkyColor").invoke(node);
-                if (sky != null && sky.length >= 3 && renderer != null) {
-                    float[] sc = displayColor(sky[0], sky[1], sky[2]);
+                float[] sky = extractFloatArray(node, "getSkyColor");
+                float[] sc = (sky != null && sky.length >= 3)
+                        ? displayColor(sky[0], sky[1], sky[2])
+                        : displayColor(0f, 0f, 0f);
+                if (renderer != null) {
                     renderer.set("background", DataType.FLOAT32_VEC4,
                                  sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, sc[0], sc[1], sc[2], 1f));
                     renderer.commit();
@@ -734,8 +713,6 @@ class X3DAnariHandler extends AbstractHandler {
                         cameraDistance = Math.abs(pos[2]) > 0.001f ? Math.abs(pos[2])
                                          : (float) Math.sqrt(pos[0]*pos[0] + pos[1]*pos[1] + pos[2]*pos[2]);
                         viewpointSet = true;
-                        // System.out.printf("Viewpoint configured: target=[%.2f, %.2f, 0] distance=%.2f%n",
-                          //                 cameraTarget[0], cameraTarget[1], cameraDistance);
                     }
                 } catch (Exception ignored) {}
             }
@@ -813,9 +790,6 @@ class X3DAnariHandler extends AbstractHandler {
                 }
                 if (skel != null) traverseList(device, skel, parentTransform, protoArgs);
 
-                // HAnim skin is a separate child of HAnimHumanoid. It must
-                // be traversed in humanoid coordinates, not beneath the
-                // individual HAnimJoint transforms.
                 Object skin = null;
                 try { skin = node.getClass().getMethod("getSkin").invoke(node); } catch (Exception ignored) {}
                 if (skin == null) {
@@ -855,7 +829,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // --- Transform / HAnimJoint Handling ---
         if (cName.contains("Transform") || cName.contains("HAnimJoint")) {
             final boolean isJoint = cName.contains("HAnimJoint");
             JointAnim joint = null;
@@ -875,8 +848,6 @@ class X3DAnariHandler extends AbstractHandler {
             try { rot = extractFloatArray(node, "getRotation"); } catch (Exception ignored) {}
 
             if (isJoint && joint != null) {
-                // HAnimJoint center is the pivot. Its authored rotation and
-                // translation are retained as the bind/rest state.
                 if (joint.rotation == null && rot != null) joint.rotation = rot.clone();
                 if (joint.translation == null && tr != null) joint.translation = tr.clone();
                 rot = joint.rotation;
@@ -1019,9 +990,6 @@ class X3DAnariHandler extends AbstractHandler {
         return r;
     }
 
-    // ------------------------------------------------------------------
-    // ANARI Object Parameter Helper
-
     private MemorySegment getAnariHandle(Object anariObj) {
         if (anariObj == null) return null;
         for (String name : List.of("handle", "segment", "getHandle", "getSegment", "address")) {
@@ -1089,130 +1057,34 @@ class X3DAnariHandler extends AbstractHandler {
         }
     }
 
-    private Instance buildShapeInstance(Device device, Object shape, float[] transformMatrix, Map<String, Object> protoArgs) throws Throwable {
-        Object x3dGeom = null;
-        try { x3dGeom = shape.getClass().getMethod("getGeometry").invoke(shape); } catch (Exception ignored) {}
-
-        try {
-            Object isNode = shape.getClass().getMethod("getIS").invoke(shape);
-            if (isNode != null) {
-                List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
-                for (Object c : connects) {
-                    String nField = extractString(c, "getNodeField");
-                    String pField = extractString(c, "getProtoField");
-                    if ("geometry".equals(nField) && protoArgs.containsKey(pField)) {
-                        x3dGeom = protoArgs.get(pField);
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-
-        x3dGeom = resolveUse(x3dGeom);
-        Geometry.Triangle geometry = createGeometry(device, x3dGeom, transformMatrix, protoArgs);
-        if (geometry == null) return null;
-
-        Material<?> material = defaultMaterial;
-        try {
-            Object app = null;
-            try { app = shape.getClass().getMethod("getAppearance").invoke(shape); } catch (Exception ignored) {}
-            app = resolveUse(app);
-
-            Object mat = (app == null) ? null : app.getClass().getMethod("getMaterial").invoke(app);
-            mat = resolveUse(mat);
-            Object tex = (app == null) ? null : app.getClass().getMethod("getTexture").invoke(app);
-            tex = resolveUse(tex);
-
-            Sampler sampler = null;
-            if (tex != null && tex.getClass().getSimpleName().contains("ImageTexture")) {
-                sampler = getOrCreateTextureSampler(device, tex);
-            }
-
-            if (mat != null || sampler != null) {
-                float[] d = null;
-                float transparency = 0f;
-
-                if (mat != null) {
-                    try { d = (float[]) mat.getClass().getMethod("getDiffuseColor").invoke(mat); } catch (Exception ignored) {}
-                    try { transparency = (float) extractDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
-
-                    // Lines and unlit materials frequently store their color in emissiveColor
-                    if (d == null || (d.length >= 3 && d[0] == 0f && d[1] == 0f && d[2] == 0f)) {
-                        float[] ec = extractFloatArray(mat, "getEmissiveColor");
-                        if (ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
-                            d = ec;
-                        }
-                    }
-
-                    if (d == null && mat.getClass().getSimpleName().contains("ProtoInstance")) {
-                        try {
-                            String pName = (String) mat.getClass().getMethod("getName").invoke(mat);
-                            if (pName != null) {
-                                int h = Math.abs(pName.hashCode());
-                                float r = (h & 0xFF) / 255.0f;
-                                float g = ((h >> 8) & 0xFF) / 255.0f;
-                                float b = ((h >> 16) & 0xFF) / 255.0f;
-                                d = new float[]{ Math.max(0.25f, r), Math.max(0.25f, g), Math.max(0.25f, b) };
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                }
-
-                if (d == null) d = new float[]{ 1f, 1f, 1f };
-                float[] c = displayColor(d[0], d[1], d[2]);
-                float opacity = Math.max(0f, Math.min(1f, 1f - transparency));
-
-                Material.Matte m = device.newMaterial(Material.SubType.MATTE);
-                if (sampler != null) {
-                    setAnariObjectParameter(m, "color", DataType.SAMPLER, sampler);
-                } else {
-                    m.setColor(c[0], c[1], c[2]);
-                }
-
-                if (opacity < 0.999f) {
-                    try {
-                        m.setFloat32("opacity", opacity);
-                    } catch (Throwable ignored) {}
-                }
-
-                m.commit();
-                keepAlive.add(m);
-                material = m;
-            } else if (x3dGeom != null && x3dGeom.getClass().getSimpleName().contains("IndexedLineSet")) {
-                // In X3D, lines without Material/Appearance default to unlit white
-                Material.Matte m = device.newMaterial(Material.SubType.MATTE);
-                float[] white = displayColor(1f, 1f, 1f);
-                m.setColor(white[0], white[1], white[2]);
-                m.commit();
-                keepAlive.add(m);
-                material = m;
-            }
-        } catch (Throwable ignored) {}
-
-        Surface surface = device.newSurface().setGeometry(geometry).setMaterial(material);
-        surface.commit();
-        keepAlive.add(surface);
-
-        Group group = device.newGroup();
-        Array1D surfArray = device.newArray1D(List.of(surface), DataType.SURFACE);
-        surfArray.commit();
-        group.setSurface(surfArray);
-        group.commit();
-        keepAlive.add(surfArray);
-        keepAlive.add(group);
-
-        Instance instance = device.newInstance(Instance.SubType.TRANSFORM);
-        instance.setGroup(group);
-        instance.setTransform(transformMatrix);
-        instance.commit();
-        return instance;
+    private static float srgbToLinear(float c) {
+        return c <= 0.04045f ? c / 12.92f : (float) Math.pow((c + 0.055) / 1.055, 2.4);
     }
 
-    private Sampler getOrCreateTextureSampler(Device device, Object imageTexture) {
+    private static float[] displayColor(float r, float g, float b) {
+        if (SRGB_ENCODE_COLORS) { r = srgbToLinear(r); g = srgbToLinear(g); b = srgbToLinear(b); }
+        return SWAP_RED_BLUE ? new float[]{ b, g, r } : new float[]{ r, g, b };
+    }
+
+    private Object resolveUse(Object node) {
+        if (node == null) return null;
+        try {
+            String use = (String) node.getClass().getMethod("getUSE").invoke(node);
+            if (use != null && !use.isEmpty() && defMap.containsKey(use)) return defMap.get(use);
+        } catch (Exception ignored) {}
+        return node;
+    }
+
+    private Sampler getOrCreateTextureSampler(Device device, Object imageTexture, float[] modulateColor) {
         try {
             String[] urls = extractStringArray(imageTexture, "getUrl");
             if (urls == null || urls.length == 0) return null;
             String firstUrl = urls[0];
-            if (textureCache.containsKey(firstUrl)) return textureCache.get(firstUrl);
+
+            String cacheKey = firstUrl + "_" + (modulateColor != null
+                    ? String.format("%.2f_%.2f_%.2f", modulateColor[0], modulateColor[1], modulateColor[2])
+                    : "raw");
+            if (textureCache.containsKey(cacheKey)) return textureCache.get(cacheKey);
 
             BufferedImage img = null;
             for (String u : urls) {
@@ -1233,10 +1105,7 @@ class X3DAnariHandler extends AbstractHandler {
                     if (f.exists() && f.isFile()) {
                         try {
                             img = ImageIO.read(f);
-                            if (img != null) {
-                                // System.out.println("Loaded texture file: " + f.getAbsolutePath());
-                                break;
-                            }
+                            if (img != null) break;
                         } catch (Exception ignored) {}
                     }
                 }
@@ -1250,10 +1119,7 @@ class X3DAnariHandler extends AbstractHandler {
                         conn.setReadTimeout(8000);
                         try (InputStream is = conn.getInputStream()) {
                             img = ImageIO.read(is);
-                            if (img != null) {
-                                // System.out.println("Downloaded texture: " + u);
-                                break;
-                            }
+                            if (img != null) break;
                         }
                     } catch (Exception e) {
                         System.err.println("Could not load remote texture from " + u + ": " + e.getMessage());
@@ -1262,19 +1128,26 @@ class X3DAnariHandler extends AbstractHandler {
             }
 
             if (img == null) {
-                System.out.println("ImageTexture: could not resolve image file for: " + firstUrl);
                 return null;
             }
 
             int width = img.getWidth(), height = img.getHeight();
             byte[] rgba = new byte[width * height * 4];
             int k = 0;
+
+            float modR = (modulateColor != null && modulateColor.length >= 3) ? modulateColor[0] : 1f;
+            float modG = (modulateColor != null && modulateColor.length >= 3) ? modulateColor[1] : 1f;
+            float modB = (modulateColor != null && modulateColor.length >= 3) ? modulateColor[2] : 1f;
+
             for (int y = height - 1; y >= 0; y--) {
                 for (int x = 0; x < width; x++) {
                     int argb = img.getRGB(x, y);
-                    byte r = (byte) ((argb >> 16) & 0xFF);
-                    byte g = (byte) ((argb >> 8)  & 0xFF);
-                    byte b = (byte) (argb         & 0xFF);
+                    int rInt = (int) (((argb >> 16) & 0xFF) * modR);
+                    int gInt = (int) (((argb >> 8)  & 0xFF) * modG);
+                    int bInt = (int) (((argb)       & 0xFF) * modB);
+                    byte r = (byte) Math.min(255, Math.max(0, rInt));
+                    byte g = (byte) Math.min(255, Math.max(0, gInt));
+                    byte b = (byte) Math.min(255, Math.max(0, bInt));
                     byte a = (byte) ((argb >> 24) & 0xFF);
 
                     if (SWAP_RED_BLUE) {
@@ -1332,8 +1205,7 @@ class X3DAnariHandler extends AbstractHandler {
 
                 sampler.commit();
                 keepAlive.add(sampler);
-                textureCache.put(firstUrl, sampler);
-                // System.out.println("ImageTexture successfully initialized (" + width + "x" + height + "): " + firstUrl);
+                textureCache.put(cacheKey, sampler);
                 return sampler;
             }
         } catch (Throwable e) {
@@ -1342,22 +1214,158 @@ class X3DAnariHandler extends AbstractHandler {
         return null;
     }
 
-    private static float srgbToLinear(float c) {
-        return c <= 0.04045f ? c / 12.92f : (float) Math.pow((c + 0.055) / 1.055, 2.4);
-    }
+    private Instance buildShapeInstance(Device device, Object shape, float[] transformMatrix, Map<String, Object> protoArgs) throws Throwable {
+        Object x3dGeom = null;
+        try { x3dGeom = shape.getClass().getMethod("getGeometry").invoke(shape); } catch (Exception ignored) {}
 
-    private static float[] displayColor(float r, float g, float b) {
-        if (SRGB_ENCODE_COLORS) { r = srgbToLinear(r); g = srgbToLinear(g); b = srgbToLinear(b); }
-        return SWAP_RED_BLUE ? new float[]{ b, g, r } : new float[]{ r, g, b };
-    }
-
-    private Object resolveUse(Object node) {
-        if (node == null) return null;
         try {
-            String use = (String) node.getClass().getMethod("getUSE").invoke(node);
-            if (use != null && !use.isEmpty() && defMap.containsKey(use)) return defMap.get(use);
+            Object isNode = shape.getClass().getMethod("getIS").invoke(shape);
+            if (isNode != null) {
+                List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                for (Object c : connects) {
+                    String nField = extractString(c, "getNodeField");
+                    String pField = extractString(c, "getProtoField");
+                    if ("geometry".equals(nField) && protoArgs.containsKey(pField)) {
+                        x3dGeom = protoArgs.get(pField);
+                    }
+                }
+            }
         } catch (Exception ignored) {}
-        return node;
+
+        x3dGeom = resolveUse(x3dGeom);
+        if (x3dGeom == null) return null;
+
+        Object app = null;
+        try { app = shape.getClass().getMethod("getAppearance").invoke(shape); } catch (Exception ignored) {}
+        app = resolveUse(app);
+
+        Object mat = (app == null) ? null : app.getClass().getMethod("getMaterial").invoke(app);
+        mat = resolveUse(mat);
+        Object tex = (app == null) ? null : app.getClass().getMethod("getTexture").invoke(app);
+        tex = resolveUse(tex);
+
+        Object texTrans = null;
+        if (app != null) {
+            try { texTrans = resolveUse(app.getClass().getMethod("getTextureTransform").invoke(app)); } catch (Exception ignored) {}
+        }
+        TextureTransformAnim ttAnim = null;
+        if (texTrans != null) {
+            String ttDef = extractString(texTrans, "getDEF");
+            if (ttDef != null && textureTransforms.containsKey(ttDef)) {
+                ttAnim = textureTransforms.get(ttDef);
+            } else {
+                float[] center = extractFloatArray(texTrans, "getCenter");
+                float rot = (float) extractDouble(texTrans, "getRotation", 0.0);
+                float[] scale = extractFloatArray(texTrans, "getScale");
+                float[] trans = extractFloatArray(texTrans, "getTranslation");
+                String tName = (ttDef != null && !ttDef.isEmpty()) ? ttDef : ("tt_" + System.identityHashCode(texTrans));
+                ttAnim = new TextureTransformAnim(tName, center, rot, scale, trans);
+                textureTransforms.put(tName, ttAnim);
+            }
+        }
+
+        // Check if this is an IndexedLineSet with per-segment/per-vertex colors (like AxisLinesShape)
+        if (x3dGeom.getClass().getSimpleName().contains("IndexedLineSet")) {
+            List<Surface> lineSurfaces = createIndexedLineSetSurfaces(device, x3dGeom, transformMatrix, mat);
+            if (lineSurfaces != null && !lineSurfaces.isEmpty()) {
+                Group group = device.newGroup();
+                Array1D surfArray = device.newArray1D(lineSurfaces, DataType.SURFACE);
+                surfArray.commit();
+                group.setSurface(surfArray);
+                group.commit();
+                keepAlive.add(surfArray);
+                keepAlive.add(group);
+
+                Instance instance = device.newInstance(Instance.SubType.TRANSFORM);
+                instance.setGroup(group);
+                instance.setTransform(transformMatrix);
+                instance.commit();
+                return instance;
+            }
+        }
+
+        Map<String, Object> geomArgs = new HashMap<>(protoArgs);
+        if (tex != null) geomArgs.put("_hasTexture", Boolean.TRUE);
+        if (ttAnim != null) geomArgs.put("_activeTextureTransform", ttAnim);
+
+        Geometry.Triangle geometry = createGeometry(device, x3dGeom, transformMatrix, geomArgs);
+        if (geometry == null) return null;
+
+        Material<?> material = defaultMaterial;
+        try {
+            float[] d = null;
+            float transparency = 0f;
+
+            if (mat != null) {
+                try { transparency = (float) extractDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
+                boolean isLine = x3dGeom.getClass().getSimpleName().contains("Line");
+                float[] ec = extractFloatArray(mat, "getEmissiveColor");
+
+                if (isLine && ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
+                    d = ec;
+                } else {
+                    try { d = (float[]) mat.getClass().getMethod("getDiffuseColor").invoke(mat); } catch (Exception ignored) {}
+                    if (d == null || (d.length >= 3 && d[0] == 0f && d[1] == 0f && d[2] == 0f)) {
+                        if (ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
+                            d = ec;
+                        }
+                    }
+                }
+            }
+
+            Sampler sampler = null;
+            if (tex != null && tex.getClass().getSimpleName().contains("ImageTexture")) {
+                sampler = getOrCreateTextureSampler(device, tex, d);
+            }
+
+            if (mat != null || sampler != null) {
+                if (d == null) d = new float[]{ 1f, 1f, 1f };
+                float[] c = displayColor(d[0], d[1], d[2]);
+                float opacity = Math.max(0f, Math.min(1f, 1f - transparency));
+
+                Material.Matte m = device.newMaterial(Material.SubType.MATTE);
+                if (sampler != null) {
+                    setAnariObjectParameter(m, "color", DataType.SAMPLER, sampler);
+                } else {
+                    m.setColor(c[0], c[1], c[2]);
+                }
+
+                if (opacity < 0.999f) {
+                    try {
+                        m.setFloat32("opacity", opacity);
+                    } catch (Throwable ignored) {}
+                }
+
+                m.commit();
+                keepAlive.add(m);
+                material = m;
+            } else if (x3dGeom.getClass().getSimpleName().contains("IndexedLineSet")) {
+                Material.Matte m = device.newMaterial(Material.SubType.MATTE);
+                float[] white = displayColor(1f, 1f, 1f);
+                m.setColor(white[0], white[1], white[2]);
+                m.commit();
+                keepAlive.add(m);
+                material = m;
+            }
+        } catch (Throwable ignored) {}
+
+        Surface surface = device.newSurface().setGeometry(geometry).setMaterial(material);
+        surface.commit();
+        keepAlive.add(surface);
+
+        Group group = device.newGroup();
+        Array1D surfArray = device.newArray1D(List.of(surface), DataType.SURFACE);
+        surfArray.commit();
+        group.setSurface(surfArray);
+        group.commit();
+        keepAlive.add(surfArray);
+        keepAlive.add(group);
+
+        Instance instance = device.newInstance(Instance.SubType.TRANSFORM);
+        instance.setGroup(group);
+        instance.setTransform(transformMatrix);
+        instance.commit();
+        return instance;
     }
 
     private Geometry.Triangle createGeometry(Device device, Object x3dGeom, float[] m, Map<String, Object> protoArgs) throws Throwable {
@@ -1399,7 +1407,17 @@ class X3DAnariHandler extends AbstractHandler {
         }
     }
 
-    private Geometry.Triangle createIndexedLineSet(Device device, Object ils, float[] m, Map<String, Object> protoArgs) throws Throwable {
+    private List<Surface> createIndexedLineSetSurfaces(Device device, Object ils, float[] m, Object mat) throws Throwable {
+        Object colorNode = null;
+        try { colorNode = resolveUse(ils.getClass().getMethod("getColor").invoke(ils)); } catch (Exception ignored) {}
+        float[] colors = (colorNode != null) ? extractFloatArray(colorNode, "getColor") : null;
+        if (colors == null && colorNode != null) {
+            colors = extractFloatArray(colorNode, "getPoint");
+        }
+        int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
+        boolean hasColor = (colors != null && colors.length >= colorStride);
+        if (!hasColor) return null;
+
         Object coord = null;
         try { coord = resolveUse(ils.getClass().getMethod("getCoord").invoke(ils)); } catch (Exception ignored) {}
         float[] pts = (coord == null) ? null : extractFloatArray(coord, "getPoint");
@@ -1410,57 +1428,33 @@ class X3DAnariHandler extends AbstractHandler {
         int[] colorIndex = extractIntArray(ils, "getColorIndex");
         boolean colorPerVertex = extractBoolean(ils, "getColorPerVertex", true);
 
-        Object colorNode = null;
-        try { colorNode = resolveUse(ils.getClass().getMethod("getColor").invoke(ils)); } catch (Exception ignored) {}
-        float[] colors = (colorNode != null) ? extractFloatArray(colorNode, "getColor") : null;
-        if (colors == null && colorNode != null) {
-            colors = extractFloatArray(colorNode, "getPoint");
-        }
-        int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
-        boolean hasColor = (colors != null && colors.length >= colorStride);
-
         List<LineSegmentDef> segments = new ArrayList<>();
-
         if (ci == null || ci.length == 0) {
             for (int i = 0; i < nverts - 1; i++) {
-                float[] c0 = null, c1 = null;
-                if (hasColor) {
-                    if (colorPerVertex) {
-                        c0 = extractColorAt(colors, i, colorStride);
-                        c1 = extractColorAt(colors, i + 1, colorStride);
-                    } else {
-                        c0 = extractColorAt(colors, 0, colorStride);
-                        c1 = c0;
-                    }
-                }
+                float[] c0 = colorPerVertex ? extractColorAt(colors, i, colorStride) : extractColorAt(colors, 0, colorStride);
+                float[] c1 = colorPerVertex ? extractColorAt(colors, i + 1, colorStride) : c0;
                 segments.add(new LineSegmentDef(i, i + 1, c0, c1));
             }
         } else {
-            int prevCoord = -1;
-            int prevColorIdx = -1;
-            int currentPolyline = 0;
-
+            int prevCoord = -1, prevColorIdx = -1, currentPolyline = 0;
             for (int i = 0; i < ci.length; i++) {
                 int coordIdx = ci[i];
                 int colIdx = (colorIndex != null && i < colorIndex.length) ? colorIndex[i] : coordIdx;
-
                 if (coordIdx < 0) {
                     if (prevCoord != -1) currentPolyline++;
                     prevCoord = -1;
                     prevColorIdx = -1;
                 } else {
                     if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
-                        float[] c0 = null, c1 = null;
-                        if (hasColor) {
-                            if (colorPerVertex) {
-                                c0 = extractColorAt(colors, prevColorIdx, colorStride);
-                                c1 = extractColorAt(colors, colIdx, colorStride);
-                            } else {
-                                int pCol = (colorIndex != null && currentPolyline < colorIndex.length)
-                                        ? colorIndex[currentPolyline] : currentPolyline;
-                                c0 = extractColorAt(colors, pCol, colorStride);
-                                c1 = c0;
-                            }
+                        float[] c0, c1;
+                        if (colorPerVertex) {
+                            c0 = extractColorAt(colors, prevColorIdx, colorStride);
+                            c1 = extractColorAt(colors, colIdx, colorStride);
+                        } else {
+                            int pCol = (colorIndex != null && currentPolyline < colorIndex.length)
+                                    ? colorIndex[currentPolyline] : currentPolyline;
+                            c0 = extractColorAt(colors, pCol, colorStride);
+                            c1 = c0;
                         }
                         segments.add(new LineSegmentDef(prevCoord, coordIdx, c0, c1));
                     }
@@ -1469,10 +1463,60 @@ class X3DAnariHandler extends AbstractHandler {
                 }
             }
         }
-
         if (segments.isEmpty()) return null;
 
-        // Compute local bounding box diagonal and average segment length for line radius
+        List<Surface> surfaces = new ArrayList<>();
+        for (LineSegmentDef seg : segments) {
+            List<LineSegmentDef> singleSegList = List.of(seg);
+            Geometry.Triangle geom = buildTubeGeometry(device, pts, singleSegList, m, false);
+            if (geom == null) continue;
+
+            float[] col = seg.c0 != null ? seg.c0 : displayColor(1f, 1f, 1f);
+            Material.Matte segMat = device.newMaterial(Material.SubType.MATTE);
+            segMat.setColor(col[0], col[1], col[2]);
+            segMat.commit();
+            keepAlive.add(segMat);
+
+            Surface surface = device.newSurface().setGeometry(geom).setMaterial(segMat);
+            surface.commit();
+            keepAlive.add(surface);
+            surfaces.add(surface);
+        }
+        return surfaces;
+    }
+
+    private Geometry.Triangle createIndexedLineSet(Device device, Object ils, float[] m, Map<String, Object> protoArgs) throws Throwable {
+        Object coord = null;
+        try { coord = resolveUse(ils.getClass().getMethod("getCoord").invoke(ils)); } catch (Exception ignored) {}
+        float[] pts = (coord == null) ? null : extractFloatArray(coord, "getPoint");
+        if (pts == null || pts.length < 6) return null;
+        int nverts = pts.length / 3;
+
+        int[] ci = extractIntArray(ils, "getCoordIndex");
+        List<LineSegmentDef> segments = new ArrayList<>();
+
+        if (ci == null || ci.length == 0) {
+            for (int i = 0; i < nverts - 1; i++) {
+                segments.add(new LineSegmentDef(i, i + 1, null, null));
+            }
+        } else {
+            int prevCoord = -1;
+            for (int coordIdx : ci) {
+                if (coordIdx < 0) {
+                    prevCoord = -1;
+                } else {
+                    if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
+                        segments.add(new LineSegmentDef(prevCoord, coordIdx, null, null));
+                    }
+                    prevCoord = coordIdx;
+                }
+            }
+        }
+        if (segments.isEmpty()) return null;
+        return buildTubeGeometry(device, pts, segments, m, false);
+    }
+
+    private Geometry.Triangle buildTubeGeometry(Device device, float[] pts, List<LineSegmentDef> segments, float[] m, boolean hasColor) throws Throwable {
         float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
         float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
         for (int i = 0; i + 2 < pts.length; i += 3) {
@@ -1508,12 +1552,10 @@ class X3DAnariHandler extends AbstractHandler {
 
         float[] vertices = new float[totalVerts * 3];
         float[] normals = new float[totalVerts * 3];
-        float[] unrolledColors = hasColor ? new float[totalVerts * 3] : null;
         int[] indices = new int[totalTris * 3];
 
         int vIdx = 0;
         int iIdx = 0;
-        float[] defaultColor = hasColor ? displayColor(1f, 1f, 1f) : null;
 
         for (LineSegmentDef seg : segments) {
             int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
@@ -1539,19 +1581,13 @@ class X3DAnariHandler extends AbstractHandler {
             float vy = dirZ * ux - dirX * uz;
             float vz = dirX * uy - dirY * ux;
 
-            float[] c0 = (seg.c0 != null) ? seg.c0 : defaultColor;
-            float[] c1 = (seg.c1 != null) ? seg.c1 : defaultColor;
-
             int baseVert = vIdx / 3;
 
-            // Cap A center (normal -dir)
             int capACenter = baseVert;
             vertices[vIdx] = ax; vertices[vIdx + 1] = ay; vertices[vIdx + 2] = az;
             normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
-            if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
             vIdx += 3;
 
-            // Cap A rim
             int capARimBase = baseVert + 1;
             for (int j = 0; j < LINE_SIDES; j++) {
                 float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
@@ -1561,11 +1597,9 @@ class X3DAnariHandler extends AbstractHandler {
                 vertices[vIdx + 1] = ay + radius * ry;
                 vertices[vIdx + 2] = az + radius * rz;
                 normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
-                if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
                 vIdx += 3;
             }
 
-            // Body Ring A (radial normals)
             int bodyRingABase = baseVert + 7;
             for (int j = 0; j < LINE_SIDES; j++) {
                 float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
@@ -1575,11 +1609,9 @@ class X3DAnariHandler extends AbstractHandler {
                 vertices[vIdx + 1] = ay + radius * ry;
                 vertices[vIdx + 2] = az + radius * rz;
                 normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
-                if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
                 vIdx += 3;
             }
 
-            // Body Ring B (radial normals)
             int bodyRingBBase = baseVert + 13;
             for (int j = 0; j < LINE_SIDES; j++) {
                 float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
@@ -1589,18 +1621,14 @@ class X3DAnariHandler extends AbstractHandler {
                 vertices[vIdx + 1] = by + radius * ry;
                 vertices[vIdx + 2] = bz + radius * rz;
                 normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
-                if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
                 vIdx += 3;
             }
 
-            // Cap B center (normal +dir)
             int capBCenter = baseVert + 19;
             vertices[vIdx] = bx; vertices[vIdx + 1] = by; vertices[vIdx + 2] = bz;
             normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
-            if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
             vIdx += 3;
 
-            // Cap B rim
             int capBRimBase = baseVert + 20;
             for (int j = 0; j < LINE_SIDES; j++) {
                 float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
@@ -1610,11 +1638,9 @@ class X3DAnariHandler extends AbstractHandler {
                 vertices[vIdx + 1] = by + radius * ry;
                 vertices[vIdx + 2] = bz + radius * rz;
                 normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
-                if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
                 vIdx += 3;
             }
 
-            // Cap A indices
             for (int j = 0; j < LINE_SIDES; j++) {
                 int next = (j + 1) % LINE_SIDES;
                 indices[iIdx++] = capACenter;
@@ -1622,7 +1648,6 @@ class X3DAnariHandler extends AbstractHandler {
                 indices[iIdx++] = capARimBase + j;
             }
 
-            // Body quad indices
             for (int j = 0; j < LINE_SIDES; j++) {
                 int next = (j + 1) % LINE_SIDES;
                 int a0 = bodyRingABase + j;
@@ -1639,7 +1664,6 @@ class X3DAnariHandler extends AbstractHandler {
                 indices[iIdx++] = b0;
             }
 
-            // Cap B indices
             for (int j = 0; j < LINE_SIDES; j++) {
                 int next = (j + 1) % LINE_SIDES;
                 indices[iIdx++] = capBCenter;
@@ -1670,15 +1694,6 @@ class X3DAnariHandler extends AbstractHandler {
         nArray.commit();
         setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
         keepAlive.add(nArray);
-
-        if (hasColor && unrolledColors != null) {
-            MemorySegment cSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledColors);
-            Array1D cArray = device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL,
-                                               DataType.FLOAT32_VEC3, totalVerts);
-            cArray.commit();
-            setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
-            keepAlive.add(cArray);
-        }
 
         geom.commit();
         keepAlive.add(vArray);
@@ -2055,19 +2070,21 @@ class X3DAnariHandler extends AbstractHandler {
         Object tcNode = null;
         try { tcNode = resolveUse(ifs.getClass().getMethod("getTexCoord").invoke(ifs)); } catch (Exception ignored) {}
         float[] uvs = (tcNode != null) ? extractFloatArray(tcNode, "getPoint") : null;
-        boolean hasUV = (uvs != null && uvs.length >= 2);
+
+        boolean hasTexture = Boolean.TRUE.equals(protoArgs.get("_hasTexture"));
+        boolean hasUV = (uvs != null && uvs.length >= 2) || hasTexture;
 
         float creaseAngle = (float) extractDouble(ifs, "getCreaseAngle", 0.0);
 
         List<int[]> tris = new ArrayList<>();
-        List<int[]> uvTris = hasUV ? new ArrayList<>() : null;
+        List<int[]> uvTris = (hasUV && uvs != null) ? new ArrayList<>() : null;
         List<Integer> triFaceId = new ArrayList<>();
         List<float[]> faceNormals = new ArrayList<>();
         List<Integer>[] vertFaces = new List[nverts];
         for (int i = 0; i < nverts; i++) vertFaces[i] = new ArrayList<>();
 
         List<Integer> faceCoord = new ArrayList<>();
-        List<Integer> faceUV = hasUV ? new ArrayList<>() : null;
+        List<Integer> faceUV = (hasUV && uvs != null) ? new ArrayList<>() : null;
 
         int currentFaceId = 0;
         for (int i = 0; i < ci.length; i++) {
@@ -2081,7 +2098,7 @@ class X3DAnariHandler extends AbstractHandler {
                 if (faceUV != null) faceUV.clear();
             } else if (idx < nverts) {
                 faceCoord.add(idx);
-                if (hasUV) {
+                if (faceUV != null) {
                     int uvIdx = (tci != null && i < tci.length && tci[i] >= 0) ? tci[i] : idx;
                     faceUV.add(uvIdx);
                 }
@@ -2096,13 +2113,23 @@ class X3DAnariHandler extends AbstractHandler {
         int totalVerts = totalTris * 3;
         float[] unrolledPts = new float[totalVerts * 3];
         float[] unrolledUV = hasUV ? new float[totalVerts * 2] : null;
+        float[] baseUVs = hasUV ? new float[totalVerts * 2] : null;
         int[] indices = new int[totalVerts];
         int[] unrolledToOrigCoord = new int[totalVerts];
+
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (int i = 0; i + 2 < pts.length; i += 3) {
+            minX = Math.min(minX, pts[i]);   maxX = Math.max(maxX, pts[i]);
+            minY = Math.min(minY, pts[i+1]); maxY = Math.max(maxY, pts[i+1]);
+        }
+        float spanX = Math.max(maxX - minX, 1e-4f);
+        float spanY = Math.max(maxY - minY, 1e-4f);
 
         int vK = 0, uvK = 0;
         for (int t = 0; t < totalTris; t++) {
             int[] cTri = tris.get(t);
-            int[] uTri = (hasUV && uvTris != null && t < uvTris.size()) ? uvTris.get(t) : null;
+            int[] uTri = (uvTris != null && t < uvTris.size()) ? uvTris.get(t) : null;
             for (int corner = 0; corner < 3; corner++) {
                 int cIdx = cTri[corner];
                 int vertIdx = t * 3 + corner;
@@ -2114,19 +2141,23 @@ class X3DAnariHandler extends AbstractHandler {
 
                 if (hasUV) {
                     int uvIdx = (uTri != null) ? uTri[corner] : cIdx;
-                    if (uvIdx * 2 + 1 < uvs.length) {
-                        unrolledUV[uvK++] = uvs[2 * uvIdx];
-                        unrolledUV[uvK++] = uvs[2 * uvIdx + 1];
+                    float u, v;
+                    if (uvs != null && uvIdx * 2 + 1 < uvs.length) {
+                        u = uvs[2 * uvIdx];
+                        v = uvs[2 * uvIdx + 1];
                     } else {
-                        unrolledUV[uvK++] = 0f;
-                        unrolledUV[uvK++] = 0f;
+                        u = (pts[3 * cIdx] - minX) / spanX;
+                        v = (pts[3 * cIdx + 1] - minY) / spanY;
                     }
+                    baseUVs[uvK] = u;
+                    unrolledUV[uvK++] = u;
+                    baseUVs[uvK] = v;
+                    unrolledUV[uvK++] = v;
                 }
                 indices[vertIdx] = vertIdx;
             }
         }
 
-        // --- Generate Normals based on creaseAngle ---
         float[] unrolledNormals = computeSmoothNormals(pts, tris, triFaceId, faceNormals, vertFaces, creaseAngle, unrolledToOrigCoord);
 
         MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledPts);
@@ -2150,10 +2181,12 @@ class X3DAnariHandler extends AbstractHandler {
         setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
         keepAlive.add(nArray);
 
+        Array1D uvArray = null;
+        MemorySegment uvSeg = null;
         if (hasUV && unrolledUV != null) {
-            MemorySegment uvSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledUV);
-            Array1D uvArray = device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL,
-                                                DataType.FLOAT32_VEC2, totalVerts);
+            uvSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledUV);
+            uvArray = device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                        DataType.FLOAT32_VEC2, totalVerts);
             uvArray.commit();
             setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, uvArray);
             keepAlive.add(uvArray);
@@ -2177,11 +2210,17 @@ class X3DAnariHandler extends AbstractHandler {
                             unrolledToOrigCoord, tris, triFaceId, vertFaces, creaseAngle
                         );
                         activeBindings.add(binding);
-                        System.out.printf("Bound animated displacer '%s' (%d deltas) to mesh (%d vertices, creaseAngle=%.2f)%n",
-                                          da.def, da.coordIndex.length, totalVerts, creaseAngle);
                     }
                 }
             }
+        }
+
+        Object activeTT = protoArgs.get("_activeTextureTransform");
+        if (activeTT instanceof TextureTransformAnim && hasUV && uvSeg != null) {
+            TextureTransformAnim ttAnim = (TextureTransformAnim) activeTT;
+            TextureTransformBinding ttb = new TextureTransformBinding(ttAnim, geom, uvSeg, uvArray, baseUVs);
+            textureBindings.add(ttb);
+            ttb.apply(device);
         }
 
         if (Boolean.TRUE.equals(protoArgs.get("_isSkin"))) {
@@ -2191,8 +2230,6 @@ class X3DAnariHandler extends AbstractHandler {
             );
             if (binding != null) {
                 skinBindings.add(binding);
-                System.out.printf("Bound HAnim skin: %d joints, %d render vertices%n",
-                                  binding.influencesByVertex.length == 0 ? 0 : joints.size(), totalVerts);
             }
         }
 
@@ -2222,10 +2259,6 @@ class X3DAnariHandler extends AbstractHandler {
         JointAnim j = new JointAnim(def, extractString(node, "getName"), center,
                                     rotation, translation, skinIndex, skinWeight, parent);
         joints.put(def, j);
-
-        System.out.printf("HAnimJoint '%s' name='%s' center=[%.4f %.4f %.4f] influences=%d%n",
-                          def, j.name, center[0], center[1], center[2],
-                          skinIndex == null ? 0 : skinIndex.length);
         return j;
     }
 
@@ -2288,12 +2321,8 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        if (influenced == 0) {
-            System.out.println("HAnim skin contains no usable skinCoordIndex/skinCoordWeight influences.");
-            return null;
-        }
+        if (influenced == 0) return null;
 
-        // Compute bind matrices once from authored/rest joint fields.
         computeBindMatrices();
 
         return new SkinMeshBinding(geom, vArray, vSeg, nArray, nSeg, pts,
@@ -2558,9 +2587,6 @@ class X3DAnariHandler extends AbstractHandler {
         return geom;
     }
 
-    // ------------------------------------------------------------------
-    // Animation model classes
-
     private static class X3DRoute {
         final String fromNode, fromField, toNode, toField;
         X3DRoute(String fn, String ff, String tn, String tf) {
@@ -2715,6 +2741,75 @@ class X3DAnariHandler extends AbstractHandler {
         float sinHalf = (float)Math.sqrt(Math.max(0f, 1f-w*w));
         if (sinHalf < 1e-6f) return new float[]{1,0,0,0};
         return new float[]{x/sinHalf, y/sinHalf, z/sinHalf, angle};
+    }
+
+    private static class TextureTransformAnim {
+        final String def;
+        final float[] center;
+        float rotation;
+        final float[] scale;
+        final float[] translation;
+
+        TextureTransformAnim(String def, float[] center, float rotation, float[] scale, float[] translation) {
+            this.def = def;
+            this.center = (center != null && center.length >= 2) ? center.clone() : new float[]{0f, 0f};
+            this.rotation = rotation;
+            this.scale = (scale != null && scale.length >= 2) ? scale.clone() : new float[]{1f, 1f};
+            this.translation = (translation != null && translation.length >= 2) ? translation.clone() : new float[]{0f, 0f};
+        }
+    }
+
+    private class TextureTransformBinding {
+        final TextureTransformAnim transform;
+        final Geometry.Triangle geometry;
+        final MemorySegment uvSeg;
+        Array1D uvArray;
+        final float[] baseUVs;
+        float lastRot = Float.NaN;
+
+        TextureTransformBinding(TextureTransformAnim transform, Geometry.Triangle geometry,
+                                MemorySegment uvSeg, Array1D uvArray, float[] baseUVs) {
+            this.transform = transform;
+            this.geometry = geometry;
+            this.uvSeg = uvSeg;
+            this.uvArray = uvArray;
+            this.baseUVs = baseUVs.clone();
+        }
+
+        boolean apply(Device device) {
+            float rot = transform.rotation;
+            if (rot == lastRot) return false;
+            lastRot = rot;
+
+            float cos = (float) Math.cos(rot);
+            float sin = (float) Math.sin(rot);
+            float cx = transform.center[0], cy = transform.center[1];
+            float sx = transform.scale[0], sy = transform.scale[1];
+            float tx = transform.translation[0], ty = transform.translation[1];
+
+            int n = baseUVs.length / 2;
+            for (int i = 0; i < n; i++) {
+                float u0 = baseUVs[i * 2];
+                float v0 = baseUVs[i * 2 + 1];
+                float du = u0 - cx;
+                float dv = v0 - cy;
+                float u1 = (du * cos - dv * sin) * sx + cx + tx;
+                float v1 = (du * sin + dv * cos) * sy + cy + ty;
+                long off = (long) i * 2 * Float.BYTES;
+                uvSeg.set(ValueLayout.JAVA_FLOAT, off, u1);
+                uvSeg.set(ValueLayout.JAVA_FLOAT, off + Float.BYTES, v1);
+            }
+
+            try {
+                Array1D fresh = device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                                  DataType.FLOAT32_VEC2, n);
+                fresh.commit();
+                setAnariObjectParameter(geometry, "vertex.attribute0", DataType.ARRAY1D, fresh);
+                geometry.commit();
+                uvArray = fresh;
+            } catch (Throwable ignored) {}
+            return true;
+        }
     }
 
     private static class JointAnim {
@@ -2990,4 +3085,3 @@ class X3DAnariHandler extends AbstractHandler {
         }
     }
 }
-
