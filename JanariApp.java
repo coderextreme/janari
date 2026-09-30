@@ -46,19 +46,19 @@ public class JanariApp extends Application {
         try {
             AnariPane anariPane = new AnariPane();
             String raw = getParameters().getRaw().isEmpty() ? modelName : getParameters().getRaw().get(0);
-            String which = raw.replaceAll("\\.(java|x3d|json)$", "");
+            String which = raw.replaceAll("\\.(java|x3d|json)$", "").replaceAll("/", ".");
 
-            X3DRoots roots = null;
+            net.coderextreme.X3DRoots roots = null;
 	    try {
 	        Class<?> clazz = Class.forName(which);
-	        roots = (X3DRoots)clazz.getDeclaredConstructor().newInstance();
+	        roots = (net.coderextreme.X3DRoots)clazz.getDeclaredConstructor().newInstance();
 	        modelName = which;
 	    } catch (ClassNotFoundException e) {
-	        // class not on classpath
+		e.printStackTrace(System.err);
 	    } catch (NoSuchMethodException e) {
-	        // no matching constructor
+		e.printStackTrace(System.err);
 	    } catch (InstantiationException | IllegalAccessException | InvocationTargetException e) {
-	        // couldn't construct it
+		e.printStackTrace(System.err);
 	    }
 /*
             switch (which) {
