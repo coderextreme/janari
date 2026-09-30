@@ -323,7 +323,7 @@ private class MFString5 {
 }
 private class MFString6 {
   private org.web3d.x3d.jsail.fields.MFString getArray() {
-    return new org.web3d.x3d.jsail.fields.MFString(new java.lang.String[] {"images/Jin.png","https://www.web3d.org/x3d/content/examples/HumanoidAnimation/Characters/images/Jin.png"});
+    return new org.web3d.x3d.jsail.fields.MFString(new java.lang.String[] {"images/Jin.png", "../www.web3d.org/x3d/content/examples/HumanoidAnimation/Characters/images/Jin.png", "https://www.web3d.org/x3d/content/examples/HumanoidAnimation/Specifications/Jin.png"});
   }
 }
 private class MFInt327 {

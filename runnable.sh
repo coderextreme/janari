@@ -1,7 +1,21 @@
+bash run.sh net/coderextreme/data/rubikOnFire.java
+bash run.sh net/coderextreme/data/KoreanCharacter01Jin.java
 bash run.sh net/coderextreme/data/JoeKickAnimation.java
+bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
+bash run.sh net/coderextreme/data/JinWink.java
 bash run.sh net/coderextreme/data/BoxEm.java
 bash run.sh net/coderextreme/data/ArchHalf.java
-bash run.sh net/coderextreme/data/JinWink.java
+bash run.sh net/coderextreme/data/Humanoid4.java
+bash run.sh net/coderextreme/data/rubikFurnace.java
+bash run.sh net/coderextreme/data/rubik.java
+bash run.sh net/coderextreme/data/rubikPly.java
+exit
+bash run.sh net/coderextreme/data/Leif5Final.java
+bash run.sh net/coderextreme/data/Leif8Final.java
+bash run.sh net/coderextreme/data/Lily5Final.java
+bash run.sh net/coderextreme/data/Lily8Final.java
+bash run.sh net/coderextreme/data/Tufani5Final.java
+bash run.sh net/coderextreme/data/Tufani8Final.java
 exit
 bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
 bash run.sh net/coderextreme/data/HAnimBehaviorPrototypes.java
@@ -96,13 +110,3 @@ bash run.sh net/coderextreme/data/KoreanCharacter12Sun.java
 bash run.sh net/coderextreme/data/KoreanCharacterMotionAnnexB01Jin.java
 bash run.sh net/coderextreme/data/KoreanCharacterMotionAnnexC01Jin.java
 bash run.sh net/coderextreme/data/KoreanCharacterMotionAnnexD01Jin.java
-bash run.sh net/coderextreme/data/Leif5Final.java
-bash run.sh net/coderextreme/data/Leif8Final.java
-bash run.sh net/coderextreme/data/Lily5Final.java
-bash run.sh net/coderextreme/data/Lily8Final.java
-bash run.sh net/coderextreme/data/rubikFurnace.java
-bash run.sh net/coderextreme/data/rubik.java
-bash run.sh net/coderextreme/data/rubikOnFire.java
-bash run.sh net/coderextreme/data/rubikPly.java
-bash run.sh net/coderextreme/data/Tufani5Final.java
-bash run.sh net/coderextreme/data/Tufani8Final.java
