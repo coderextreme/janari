@@ -175,6 +175,17 @@ class X3DAnariHandler extends AbstractHandler {
     private float lastAz = Float.NaN, lastEl = Float.NaN;
     private boolean built = false;
 
+    private static final int LINE_SIDES = 6;
+    private static final float[] LINE_COS = new float[LINE_SIDES];
+    private static final float[] LINE_SIN = new float[LINE_SIDES];
+    static {
+        for (int i = 0; i < LINE_SIDES; i++) {
+            double angle = 2.0 * Math.PI * i / LINE_SIDES;
+            LINE_COS[i] = (float) Math.cos(angle);
+            LINE_SIN[i] = (float) Math.sin(angle);
+        }
+    }
+
     private long animStartTime = 0;
     private long frameCount = 0;
     private final List<X3DRoute> routes = new ArrayList<>();
@@ -186,7 +197,7 @@ class X3DAnariHandler extends AbstractHandler {
     private final List<DisplacerMeshBinding> activeBindings = new ArrayList<>();
     private final List<SkinMeshBinding> skinBindings = new ArrayList<>();
 
-    // HAnim joint state used for CPU skinning.  HAnimJoint centers are
+    // HAnim joint state used for CPU skinning. HAnimJoint centers are
     // retained exactly as authored and ROUTE animation replaces rotation/
     // translation fields just as set_rotation/set_translation would.
     private final Map<String, JointAnim> joints = new HashMap<>();
@@ -516,6 +527,7 @@ class X3DAnariHandler extends AbstractHandler {
         tryInvokeAndCache(node, "getTexture");
         tryInvokeAndCache(node, "getCoord");
         tryInvokeAndCache(node, "getTexCoord");
+        tryInvokeAndCache(node, "getColor");
         tryInvokeAndCache(node, "getProtoBody");
         tryInvokeAndCache(node, "getProtoInterface");
         tryInvokeAndCache(node, "getProtoDeclareList");
@@ -787,7 +799,7 @@ class X3DAnariHandler extends AbstractHandler {
                 }
                 if (skel != null) traverseList(device, skel, parentTransform, protoArgs);
 
-                // HAnim skin is a separate child of HAnimHumanoid.  It must
+                // HAnim skin is a separate child of HAnimHumanoid. It must
                 // be traversed in humanoid coordinates, not beneath the
                 // individual HAnimJoint transforms.
                 Object skin = null;
@@ -849,7 +861,7 @@ class X3DAnariHandler extends AbstractHandler {
             try { rot = extractFloatArray(node, "getRotation"); } catch (Exception ignored) {}
 
             if (isJoint && joint != null) {
-                // HAnimJoint center is the pivot.  Its authored rotation and
+                // HAnimJoint center is the pivot. Its authored rotation and
                 // translation are retained as the bind/rest state.
                 if (joint.rotation == null && rot != null) joint.rotation = rot.clone();
                 if (joint.translation == null && tr != null) joint.translation = tr.clone();
@@ -1109,6 +1121,14 @@ class X3DAnariHandler extends AbstractHandler {
                     try { d = (float[]) mat.getClass().getMethod("getDiffuseColor").invoke(mat); } catch (Exception ignored) {}
                     try { transparency = (float) extractDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
 
+                    // Lines and unlit materials frequently store their color in emissiveColor
+                    if (d == null || (d.length >= 3 && d[0] == 0f && d[1] == 0f && d[2] == 0f)) {
+                        float[] ec = extractFloatArray(mat, "getEmissiveColor");
+                        if (ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
+                            d = ec;
+                        }
+                    }
+
                     if (d == null && mat.getClass().getSimpleName().contains("ProtoInstance")) {
                         try {
                             String pName = (String) mat.getClass().getMethod("getName").invoke(mat);
@@ -1140,6 +1160,14 @@ class X3DAnariHandler extends AbstractHandler {
                     } catch (Throwable ignored) {}
                 }
 
+                m.commit();
+                keepAlive.add(m);
+                material = m;
+            } else if (x3dGeom != null && x3dGeom.getClass().getSimpleName().contains("IndexedLineSet")) {
+                // In X3D, lines without Material/Appearance default to unlit white
+                Material.Matte m = device.newMaterial(Material.SubType.MATTE);
+                float[] white = displayColor(1f, 1f, 1f);
+                m.setColor(white[0], white[1], white[2]);
                 m.commit();
                 keepAlive.add(m);
                 material = m;
@@ -1327,6 +1355,7 @@ class X3DAnariHandler extends AbstractHandler {
             case "Cylinder":       return createCylinder(device, x3dGeom, m);
             case "Extrusion":      return createExtrusion(device, x3dGeom, m);
             case "IndexedFaceSet": return createIndexedFaceSet(device, x3dGeom, m, protoArgs);
+            case "IndexedLineSet": return createIndexedLineSet(device, x3dGeom, m, protoArgs);
             default:
                 System.out.println("Unsupported geometry type: " + g);
                 return null;
@@ -1343,6 +1372,313 @@ class X3DAnariHandler extends AbstractHandler {
             bmin[1] = Math.min(bmin[1], wy); bmax[1] = Math.max(bmax[1], wy);
             bmin[2] = Math.min(bmin[2], wz); bmax[2] = Math.max(bmax[2], wz);
         }
+    }
+
+    private static class LineSegmentDef {
+        final int p0, p1;
+        final float[] c0, c1;
+        LineSegmentDef(int p0, int p1, float[] c0, float[] c1) {
+            this.p0 = p0;
+            this.p1 = p1;
+            this.c0 = c0;
+            this.c1 = c1;
+        }
+    }
+
+    private Geometry.Triangle createIndexedLineSet(Device device, Object ils, float[] m, Map<String, Object> protoArgs) throws Throwable {
+        Object coord = null;
+        try { coord = resolveUse(ils.getClass().getMethod("getCoord").invoke(ils)); } catch (Exception ignored) {}
+        float[] pts = (coord == null) ? null : extractFloatArray(coord, "getPoint");
+        if (pts == null || pts.length < 6) return null;
+        int nverts = pts.length / 3;
+
+        int[] ci = extractIntArray(ils, "getCoordIndex");
+        int[] colorIndex = extractIntArray(ils, "getColorIndex");
+        boolean colorPerVertex = extractBoolean(ils, "getColorPerVertex", true);
+
+        Object colorNode = null;
+        try { colorNode = resolveUse(ils.getClass().getMethod("getColor").invoke(ils)); } catch (Exception ignored) {}
+        float[] colors = (colorNode != null) ? extractFloatArray(colorNode, "getColor") : null;
+        if (colors == null && colorNode != null) {
+            colors = extractFloatArray(colorNode, "getPoint");
+        }
+        int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
+        boolean hasColor = (colors != null && colors.length >= colorStride);
+
+        List<LineSegmentDef> segments = new ArrayList<>();
+
+        if (ci == null || ci.length == 0) {
+            for (int i = 0; i < nverts - 1; i++) {
+                float[] c0 = null, c1 = null;
+                if (hasColor) {
+                    if (colorPerVertex) {
+                        c0 = extractColorAt(colors, i, colorStride);
+                        c1 = extractColorAt(colors, i + 1, colorStride);
+                    } else {
+                        c0 = extractColorAt(colors, 0, colorStride);
+                        c1 = c0;
+                    }
+                }
+                segments.add(new LineSegmentDef(i, i + 1, c0, c1));
+            }
+        } else {
+            int prevCoord = -1;
+            int prevColorIdx = -1;
+            int currentPolyline = 0;
+
+            for (int i = 0; i < ci.length; i++) {
+                int coordIdx = ci[i];
+                int colIdx = (colorIndex != null && i < colorIndex.length) ? colorIndex[i] : coordIdx;
+
+                if (coordIdx < 0) {
+                    if (prevCoord != -1) currentPolyline++;
+                    prevCoord = -1;
+                    prevColorIdx = -1;
+                } else {
+                    if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
+                        float[] c0 = null, c1 = null;
+                        if (hasColor) {
+                            if (colorPerVertex) {
+                                c0 = extractColorAt(colors, prevColorIdx, colorStride);
+                                c1 = extractColorAt(colors, colIdx, colorStride);
+                            } else {
+                                int pCol = (colorIndex != null && currentPolyline < colorIndex.length)
+                                        ? colorIndex[currentPolyline] : currentPolyline;
+                                c0 = extractColorAt(colors, pCol, colorStride);
+                                c1 = c0;
+                            }
+                        }
+                        segments.add(new LineSegmentDef(prevCoord, coordIdx, c0, c1));
+                    }
+                    prevCoord = coordIdx;
+                    prevColorIdx = colIdx;
+                }
+            }
+        }
+
+        if (segments.isEmpty()) return null;
+
+        // Compute local bounding box diagonal and average segment length for line radius
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (int i = 0; i + 2 < pts.length; i += 3) {
+            minX = Math.min(minX, pts[i]);   maxX = Math.max(maxX, pts[i]);
+            minY = Math.min(minY, pts[i+1]); maxY = Math.max(maxY, pts[i+1]);
+            minZ = Math.min(minZ, pts[i+2]); maxZ = Math.max(maxZ, pts[i+2]);
+        }
+        float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+        float diag = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        float totalSegLen = 0f;
+        int validSegCount = 0;
+        for (LineSegmentDef seg : segments) {
+            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
+            float sx = pts[p1] - pts[p0];
+            float sy = pts[p1 + 1] - pts[p0 + 1];
+            float sz = pts[p1 + 2] - pts[p0 + 2];
+            float slen = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
+            if (slen > 1e-7f) {
+                totalSegLen += slen;
+                validSegCount++;
+            }
+        }
+        if (validSegCount == 0) return null;
+
+        float avgLen = totalSegLen / validSegCount;
+        float radius = diag > 0f ? diag * 0.002f : 0.005f;
+        if (avgLen > 1e-6f) radius = Math.min(radius, avgLen * 0.05f);
+        if (radius < 1e-5f) radius = (avgLen > 1e-6f) ? avgLen * 0.02f : 0.002f;
+
+        int totalVerts = validSegCount * 26;
+        int totalTris = validSegCount * 24;
+
+        float[] vertices = new float[totalVerts * 3];
+        float[] normals = new float[totalVerts * 3];
+        float[] unrolledColors = hasColor ? new float[totalVerts * 3] : null;
+        int[] indices = new int[totalTris * 3];
+
+        int vIdx = 0;
+        int iIdx = 0;
+        float[] defaultColor = hasColor ? displayColor(1f, 1f, 1f) : null;
+
+        for (LineSegmentDef seg : segments) {
+            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
+            float ax = pts[p0], ay = pts[p0 + 1], az = pts[p0 + 2];
+            float bx = pts[p1], by = pts[p1 + 1], bz = pts[p1 + 2];
+
+            float dirX = bx - ax, dirY = by - ay, dirZ = bz - az;
+            float len = (float) Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+            if (len < 1e-7f) continue;
+
+            dirX /= len; dirY /= len; dirZ /= len;
+
+            float ux, uy, uz;
+            if (Math.abs(dirY) < 0.9f) {
+                ux = -dirZ; uy = 0f; uz = dirX;
+            } else {
+                ux = 0f; uy = dirZ; uz = -dirY;
+            }
+            float uLen = (float) Math.sqrt(ux * ux + uy * uy + uz * uz);
+            ux /= uLen; uy /= uLen; uz /= uLen;
+
+            float vx = dirY * uz - dirZ * uy;
+            float vy = dirZ * ux - dirX * uz;
+            float vz = dirX * uy - dirY * ux;
+
+            float[] c0 = (seg.c0 != null) ? seg.c0 : defaultColor;
+            float[] c1 = (seg.c1 != null) ? seg.c1 : defaultColor;
+
+            int baseVert = vIdx / 3;
+
+            // Cap A center (normal -dir)
+            int capACenter = baseVert;
+            vertices[vIdx] = ax; vertices[vIdx + 1] = ay; vertices[vIdx + 2] = az;
+            normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
+            if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
+            vIdx += 3;
+
+            // Cap A rim
+            int capARimBase = baseVert + 1;
+            for (int j = 0; j < LINE_SIDES; j++) {
+                float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
+                float ry = LINE_COS[j] * uy + LINE_SIN[j] * vy;
+                float rz = LINE_COS[j] * uz + LINE_SIN[j] * vz;
+                vertices[vIdx] = ax + radius * rx;
+                vertices[vIdx + 1] = ay + radius * ry;
+                vertices[vIdx + 2] = az + radius * rz;
+                normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
+                if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
+                vIdx += 3;
+            }
+
+            // Body Ring A (radial normals)
+            int bodyRingABase = baseVert + 7;
+            for (int j = 0; j < LINE_SIDES; j++) {
+                float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
+                float ry = LINE_COS[j] * uy + LINE_SIN[j] * vy;
+                float rz = LINE_COS[j] * uz + LINE_SIN[j] * vz;
+                vertices[vIdx] = ax + radius * rx;
+                vertices[vIdx + 1] = ay + radius * ry;
+                vertices[vIdx + 2] = az + radius * rz;
+                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
+                if (hasColor) { unrolledColors[vIdx] = c0[0]; unrolledColors[vIdx + 1] = c0[1]; unrolledColors[vIdx + 2] = c0[2]; }
+                vIdx += 3;
+            }
+
+            // Body Ring B (radial normals)
+            int bodyRingBBase = baseVert + 13;
+            for (int j = 0; j < LINE_SIDES; j++) {
+                float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
+                float ry = LINE_COS[j] * uy + LINE_SIN[j] * vy;
+                float rz = LINE_COS[j] * uz + LINE_SIN[j] * vz;
+                vertices[vIdx] = bx + radius * rx;
+                vertices[vIdx + 1] = by + radius * ry;
+                vertices[vIdx + 2] = bz + radius * rz;
+                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
+                if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
+                vIdx += 3;
+            }
+
+            // Cap B center (normal +dir)
+            int capBCenter = baseVert + 19;
+            vertices[vIdx] = bx; vertices[vIdx + 1] = by; vertices[vIdx + 2] = bz;
+            normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
+            if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
+            vIdx += 3;
+
+            // Cap B rim
+            int capBRimBase = baseVert + 20;
+            for (int j = 0; j < LINE_SIDES; j++) {
+                float rx = LINE_COS[j] * ux + LINE_SIN[j] * vx;
+                float ry = LINE_COS[j] * uy + LINE_SIN[j] * vy;
+                float rz = LINE_COS[j] * uz + LINE_SIN[j] * vz;
+                vertices[vIdx] = bx + radius * rx;
+                vertices[vIdx + 1] = by + radius * ry;
+                vertices[vIdx + 2] = bz + radius * rz;
+                normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
+                if (hasColor) { unrolledColors[vIdx] = c1[0]; unrolledColors[vIdx + 1] = c1[1]; unrolledColors[vIdx + 2] = c1[2]; }
+                vIdx += 3;
+            }
+
+            // Cap A indices
+            for (int j = 0; j < LINE_SIDES; j++) {
+                int next = (j + 1) % LINE_SIDES;
+                indices[iIdx++] = capACenter;
+                indices[iIdx++] = capARimBase + next;
+                indices[iIdx++] = capARimBase + j;
+            }
+
+            // Body quad indices
+            for (int j = 0; j < LINE_SIDES; j++) {
+                int next = (j + 1) % LINE_SIDES;
+                int a0 = bodyRingABase + j;
+                int a1 = bodyRingABase + next;
+                int b0 = bodyRingBBase + j;
+                int b1 = bodyRingBBase + next;
+
+                indices[iIdx++] = a0;
+                indices[iIdx++] = a1;
+                indices[iIdx++] = b0;
+
+                indices[iIdx++] = a1;
+                indices[iIdx++] = b1;
+                indices[iIdx++] = b0;
+            }
+
+            // Cap B indices
+            for (int j = 0; j < LINE_SIDES; j++) {
+                int next = (j + 1) % LINE_SIDES;
+                indices[iIdx++] = capBCenter;
+                indices[iIdx++] = capBRimBase + j;
+                indices[iIdx++] = capBRimBase + next;
+            }
+        }
+
+        addBounds(vertices, m);
+
+        MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
+        Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.FLOAT32_VEC3, totalVerts);
+        vArray.commit();
+
+        MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.UINT32_VEC3, totalTris);
+        iArray.commit();
+
+        Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, normals);
+        Array1D nArray = device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.FLOAT32_VEC3, totalVerts);
+        nArray.commit();
+        setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+        keepAlive.add(nArray);
+
+        if (hasColor && unrolledColors != null) {
+            MemorySegment cSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledColors);
+            Array1D cArray = device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                               DataType.FLOAT32_VEC3, totalVerts);
+            cArray.commit();
+            setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
+            keepAlive.add(cArray);
+        }
+
+        geom.commit();
+        keepAlive.add(vArray);
+        keepAlive.add(iArray);
+        keepAlive.add(geom);
+        return geom;
+    }
+
+    private static float[] extractColorAt(float[] colors, int cIdx, int stride) {
+        if (colors == null || cIdx < 0 || (cIdx * stride + 2) >= colors.length) return null;
+        float r = colors[cIdx * stride];
+        float g = colors[cIdx * stride + 1];
+        float b = colors[cIdx * stride + 2];
+        return displayColor(r, g, b);
     }
 
     private Geometry.Triangle createSphere(Device device, Object sphere, float[] m) throws Throwable {
@@ -1849,7 +2185,6 @@ class X3DAnariHandler extends AbstractHandler {
         return geom;
     }
 
-
     private JointAnim registerJoint(Object node) {
         String def = extractString(node, "getDEF");
         if (def == null || def.isEmpty()) return null;
@@ -1960,10 +2295,6 @@ class X3DAnariHandler extends AbstractHandler {
 
     private float[] computeBindMatrix(JointAnim j) {
         if (j.bindMatrix != null) return j.bindMatrix;
-        float[] oldRot = j.rotation;
-        float[] oldTrans = j.translation;
-        // bindMatrix is the authored rest pose.  Since animation state is
-        // initialized from those same fields this is stable across frames.
         float[] local = buildHAnimJointMatrix(j);
         j.bindMatrix = j.parent == null
             ? local
@@ -1984,8 +2315,6 @@ class X3DAnariHandler extends AbstractHandler {
     }
 
     private static float[] invertRigidMatrix(float[] m) {
-        // Joint transforms are rigid (no scale).  Invert the 3x3 rotation and
-        // translation using the transpose.
         float[] r = {
             m[0],m[1],m[2],0,
             m[4],m[5],m[6],0,
@@ -2003,14 +2332,6 @@ class X3DAnariHandler extends AbstractHandler {
             m[0]*x + m[4]*y + m[8]*z + m[12],
             m[1]*x + m[5]*y + m[9]*z + m[13],
             m[2]*x + m[6]*y + m[10]*z + m[14]
-        };
-    }
-
-    private static float[] transformVector(float[] m, float x, float y, float z) {
-        return new float[]{
-            m[0]*x + m[4]*y + m[8]*z,
-            m[1]*x + m[5]*y + m[9]*z,
-            m[2]*x + m[6]*y + m[10]*z
         };
     }
 
@@ -2460,9 +2781,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
 
             float[] source = baseCoords.clone();
-            // HAnimDisplacer modifies the humanoid skin coordinates before
-            // joint skinning.  This is how JoeKickAnimation's skull action
-            // participates in the same animated skin.
             for (DisplacerAnim da : displacers.values()) {
                 if (da.currentWeight == 0f || da.coordIndex == null || da.displacements == null) continue;
                 int n = Math.min(da.coordIndex.length, da.displacements.length / 3);
@@ -2543,7 +2861,6 @@ class X3DAnariHandler extends AbstractHandler {
                 nArray = freshN;
             } catch (Throwable ignored) {}
         }
-
     }
 
     private static class DisplacerAnim {
@@ -2610,7 +2927,6 @@ class X3DAnariHandler extends AbstractHandler {
                 vSeg.set(ValueLayout.JAVA_FLOAT, offset + 2 * Float.BYTES, deformed[cIdx * 3 + 2]);
             }
 
-            // Recompute smooth face and vertex normals for deformed mesh
             int maxFaceId = 0;
             for (int fid : triFaceId) if (fid > maxFaceId) maxFaceId = fid;
             List<float[]> deformedFaceNormals = new ArrayList<>(maxFaceId + 1);
