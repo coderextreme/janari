@@ -69,6 +69,7 @@ public class mobiusCarlson implements X3DRoots {
         .addMeta(new meta().setName(new SFString("description")).setContent(new SFString("a mobius of 3 NURBS Patch Surfaces"))))
       .setScene(new Scene()
         .addChild(new Background().setSkyColor(new MFColor0().getArray()))
+        .addChild(new Viewpoint().setPosition(new float[] {0f ,0f ,20f }))
         .addChild(new Shape()
           .setGeometry(new NurbsPatchSurface().setSolid(false).setUDimension(91).setUKnot(new MFDouble1().getArray()).setUOrder(4).setVDimension(3).setVKnot(new MFDouble2().getArray()).setWeight(new MFDouble3().getArray())
             .setMetadata(new MetadataSet()

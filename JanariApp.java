@@ -25,6 +25,7 @@ import org.web3d.x3d.jsail.Geometry3D.*;
 import org.web3d.x3d.jsail.Grouping.*;
 import org.web3d.x3d.jsail.HAnim.*;
 import org.web3d.x3d.jsail.Navigation.*;
+import org.web3d.x3d.jsail.NURBS.*;
 import org.web3d.x3d.jsail.EnvironmentalEffects.*;
 import org.web3d.x3d.jsail.Rendering.*;
 import org.web3d.x3d.jsail.Shape.*;
@@ -544,11 +545,6 @@ class AnariContext {
         return SWAP_RED_BLUE ? new float[]{ b, g, r } : new float[]{ r, g, b };
     }
 
-    /**
-     * Deterministic color palette for X3D geometry that has no explicit
-     * Material/Color/ColorRGBA and whose texture could not be resolved.
-     * Explicit X3D colors and textures always take precedence.
-     */
     float[] fallbackObjectColor(Object seed, boolean skin) {
         if (skin) return displayColor(0.86f, 0.68f, 0.54f);
 
@@ -845,6 +841,13 @@ class X3DTypeAdapter {
         } catch (Exception ignored) { return null; }
     }
 
+    static double[] asDoubleArray(Object node, String method) {
+        try {
+            Object res = node.getClass().getMethod(method).invoke(node);
+            return toDoubleArray(res);
+        } catch (Exception ignored) { return null; }
+    }
+
     static int[] asIntArray(Object node, String method) {
         try {
             Object res = node.getClass().getMethod(method).invoke(node);
@@ -867,6 +870,19 @@ class X3DTypeAdapter {
                 Method mVal = res.getClass().getMethod("getValue");
                 Object v = mVal.invoke(res);
                 if (v instanceof Number) return ((Number) v).doubleValue();
+            }
+        } catch (Exception ignored) {}
+        return fallback;
+    }
+
+    static int asInt(Object node, String method, int fallback) {
+        try {
+            Object res = node.getClass().getMethod(method).invoke(node);
+            if (res instanceof Number) return ((Number) res).intValue();
+            if (res != null) {
+                Method mVal = res.getClass().getMethod("getValue");
+                Object v = mVal.invoke(res);
+                if (v instanceof Number) return ((Number) v).intValue();
             }
         } catch (Exception ignored) {}
         return fallback;
@@ -897,6 +913,30 @@ class X3DTypeAdapter {
         return null;
     }
 
+    static double[] toDoubleArray(Object o) {
+        if (o == null) return null;
+        if (o instanceof double[]) return (double[]) o;
+        if (o instanceof float[]) {
+            float[] fa = (float[]) o;
+            double[] da = new double[fa.length];
+            for (int i = 0; i < fa.length; i++) da[i] = fa[i];
+            return da;
+        }
+        for (String mName : List.of("getValue", "getArray")) {
+            try {
+                Object res = o.getClass().getMethod(mName).invoke(o);
+                if (res instanceof double[]) return (double[]) res;
+                if (res instanceof float[]) {
+                    float[] fa = (float[]) res;
+                    double[] da = new double[fa.length];
+                    for (int i = 0; i < fa.length; i++) da[i] = fa[i];
+                    return da;
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
     static int[] toIntArray(Object o) {
         if (o == null) return null;
         if (o instanceof int[]) return (int[]) o;
@@ -909,21 +949,12 @@ class X3DTypeAdapter {
         return null;
     }
 
-    /**
-     * Extract TEXCOORD_0 point data from either a TextureCoordinate directly
-     * or an X3D MultiTextureCoordinate wrapper.  X3DJSAIL versions differ in
-     * whether getTexCoord()/getTexCoordList() returns the node, an MFNode, or
-     * a Java List, so do not assume a single concrete return type.
-     */
     static float[] textureCoordinatePoints(Object tcNode) {
         if (tcNode == null) return null;
 
-        // Direct TextureCoordinate / TextureCoordinateGenerator.
         float[] direct = asFloatArray(tcNode, "getPoint");
         if (direct != null && direct.length >= 2) return direct;
 
-        // MultiTextureCoordinate: prefer mapping=TEXCOORD_0, otherwise first
-        // usable TextureCoordinate.
         for (String method : List.of("getTexCoord", "getTexCoordList", "getTextureCoordinate", "getTextureCoordinateList")) {
             try {
                 Object value = tcNode.getClass().getMethod(method).invoke(tcNode);
@@ -937,7 +968,6 @@ class X3DTypeAdapter {
     private static float[] textureCoordinatePointsRecursive(Object value) {
         if (value == null) return null;
         if (value instanceof List<?>) {
-            // First pass: explicitly mapped TEXCOORD_0.
             for (Object item : (List<?>) value) {
                 float[] found = textureCoordinatePointsMapped(item, "TEXCOORD_0");
                 if (found != null) return found;
@@ -964,8 +994,6 @@ class X3DTypeAdapter {
         float[] direct = asFloatArray(value, "getPoint");
         if (direct != null && direct.length >= 2) return direct;
 
-        // X3DJSAIL MFNode wrappers can expose their contained nodes through
-        // getArray()/getValue()/getNodes()/getChildren().
         for (String m : List.of("getArray", "getValue", "getNodes", "getChildren", "getChildrenList")) {
             try {
                 Object nested = value.getClass().getMethod(m).invoke(value);
@@ -1060,9 +1088,6 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 try { tex = app.getClass().getMethod("getTexture").invoke(app); } catch (Exception ignored) {}
             }
             mat = ctx.resolveUse(mat);
-            // X3D 4 PhysicalMaterial stores the color image in baseTexture rather
-            // than Appearance.texture.  Keep the classic Appearance.texture path
-            // above, then fall back to PhysicalMaterial.baseTexture.
             if (tex == null && mat != null) {
                 for (String tm : List.of("getBaseTexture", "getBaseTextureList", "getTexture")) {
                     try {
@@ -1100,9 +1125,15 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 }
             }
 
-            if (x3dGeom.getClass().getSimpleName().contains("IndexedLineSet")) {
-                AnariIndexedLineSet lineSet = AnariNodeFactory.adaptLineSet(x3dGeom);
-                lineSet.renderLines(ctx, parentTransform, mat);
+            String gName = x3dGeom.getClass().getSimpleName();
+            if (gName.contains("IndexedLineSet")) {
+                AnariIndexedLineSet lineSet = AnariNodeFactory.adaptIndexedLineSet(x3dGeom);
+                lineSet.renderLines(ctx, parentTransform, mat, app);
+                return;
+            }
+            if (gName.equals("LineSet") || x3dGeom instanceof org.web3d.x3d.jsail.Rendering.LineSet) {
+                AnariLineSet lineSet = AnariNodeFactory.adaptLineSet(x3dGeom);
+                lineSet.renderLines(ctx, parentTransform, mat, app);
                 return;
             }
 
@@ -1123,11 +1154,8 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
 
             if (mat != null) {
                 try { transparency = (float) X3DTypeAdapter.asDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
-
-                // Classic X3D Material.
                 d = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
 
-                // X3D 4 PhysicalMaterial uses baseColor rather than diffuseColor.
                 if (d == null) {
                     for (String cm : List.of("getBaseColor", "getBaseColorFactor", "getColor")) {
                         d = X3DTypeAdapter.asFloatArray(mat, cm);
@@ -1135,9 +1163,6 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                     }
                 }
 
-                // Emissive color is only a diffuse fallback for non-PhysicalMaterial
-                // nodes.  This prevents an emissive white value from washing out a
-                // textured/colored PhysicalMaterial when its image is unavailable.
                 if (d == null && !mat.getClass().getSimpleName().contains("PhysicalMaterial")) {
                     float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
                     if (ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) d = ec;
@@ -1173,10 +1198,6 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 ctx.keepAlive.add(m);
                 material = m;
             } else {
-                // If there is no usable explicit material or texture, give each
-                // shape a stable saturated color instead of rendering the entire
-                // model white/gray.  X3D Color/ColorRGBA vertex colors still win
-                // because that branch is handled above.
                 if (d == null || (d.length >= 3 && (d[0] + d[1] + d[2] < 0.05f))) {
                     if (isSkin) {
                         d = new float[]{ 0.86f, 0.68f, 0.54f };
@@ -1654,6 +1675,790 @@ class AnariGroup extends org.web3d.x3d.jsail.Grouping.Group implements AnariNode
     }
 }
 
+// ============================================================================
+// SHARED LINE RENDERING HELPER (TUBES, CAPS, AND MATERIALS)
+// ============================================================================
+
+class AnariLineHelper {
+    static class LineSegmentDef {
+        final int p0, p1;
+        final float[] c0, c1;
+        LineSegmentDef(int p0, int p1, float[] c0, float[] c1) {
+            this.p0 = p0; this.p1 = p1; this.c0 = c0; this.c1 = c1;
+        }
+    }
+
+    static float[] getColorAt(float[] colors, int cIdx, int stride, AnariContext ctx) {
+        if (colors == null || cIdx < 0 || (cIdx * stride + 2) >= colors.length) return null;
+        return ctx.displayColor(colors[cIdx * stride], colors[cIdx * stride + 1], colors[cIdx * stride + 2]);
+    }
+
+    static void renderSegments(AnariContext ctx, float[] pts, List<LineSegmentDef> segments,
+                               float[] m, float[] defaultLineCol, float lineWidthScale) {
+        try {
+            if (segments == null || segments.isEmpty()) return;
+            List<Surface> surfaces = new ArrayList<>();
+            for (LineSegmentDef seg : segments) {
+                Geometry.Triangle geom = buildTubeGeometry(ctx, pts, List.of(seg), m, lineWidthScale);
+                if (geom == null) continue;
+
+                float[] col = seg.c0 != null ? seg.c0 : defaultLineCol;
+                Material.Matte segMat = ctx.device.newMaterial(Material.SubType.MATTE);
+                segMat.setColor(col[0], col[1], col[2]);
+                segMat.commit();
+                ctx.keepAlive.add(segMat);
+
+                Surface surface = ctx.device.newSurface().setGeometry(geom).setMaterial(segMat);
+                surface.commit();
+                ctx.keepAlive.add(surface);
+                surfaces.add(surface);
+            }
+
+            if (!surfaces.isEmpty()) {
+                Group group = ctx.device.newGroup();
+                Array1D surfArray = ctx.device.newArray1D(surfaces, DataType.SURFACE);
+                surfArray.commit();
+                group.setSurface(surfArray);
+                group.commit();
+                ctx.keepAlive.add(surfArray);
+                ctx.keepAlive.add(group);
+
+                Instance instance = ctx.device.newInstance(Instance.SubType.TRANSFORM);
+                instance.setGroup(group);
+                instance.setTransform(m);
+                instance.commit();
+                ctx.anariInstances.add(instance);
+                ctx.instanceTransforms.put(instance, m.clone());
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+
+    static Geometry.Triangle buildTubeGeometry(AnariContext ctx, float[] pts, List<LineSegmentDef> segments,
+                                              float[] m, float lineWidthScale) throws Throwable {
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (int i = 0; i + 2 < pts.length; i += 3) {
+            minX = Math.min(minX, pts[i]);   maxX = Math.max(maxX, pts[i]);
+            minY = Math.min(minY, pts[i+1]); maxY = Math.max(maxY, pts[i+1]);
+            minZ = Math.min(minZ, pts[i+2]); maxZ = Math.max(maxZ, pts[i+2]);
+        }
+        float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+        float diag = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        float totalSegLen = 0f;
+        int validSegCount = 0;
+        for (LineSegmentDef seg : segments) {
+            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
+            float sx = pts[p1] - pts[p0], sy = pts[p1 + 1] - pts[p0 + 1], sz = pts[p1 + 2] - pts[p0 + 2];
+            float slen = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
+            if (slen > 1e-7f) { totalSegLen += slen; validSegCount++; }
+        }
+        if (validSegCount == 0) return null;
+
+        float avgLen = totalSegLen / validSegCount;
+        float radius = diag > 0f ? diag * 0.002f : 0.005f;
+        if (avgLen > 1e-6f) radius = Math.min(radius, avgLen * 0.05f);
+        if (radius < 1e-5f) radius = (avgLen > 1e-6f) ? avgLen * 0.02f : 0.002f;
+        radius *= Math.max(0.1f, lineWidthScale);
+
+        int totalVerts = validSegCount * 26;
+        int totalTris = validSegCount * 24;
+
+        float[] vertices = new float[totalVerts * 3];
+        float[] normals = new float[totalVerts * 3];
+        int[] indices = new int[totalTris * 3];
+
+        int vIdx = 0, iIdx = 0;
+
+        for (LineSegmentDef seg : segments) {
+            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
+            float ax = pts[p0], ay = pts[p0 + 1], az = pts[p0 + 2];
+            float bx = pts[p1], by = pts[p1 + 1], bz = pts[p1 + 2];
+
+            float dirX = bx - ax, dirY = by - ay, dirZ = bz - az;
+            float len = (float) Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+            if (len < 1e-7f) continue;
+
+            dirX /= len; dirY /= len; dirZ /= len;
+
+            float ux, uy, uz;
+            if (Math.abs(dirY) < 0.9f) {
+                ux = -dirZ; uy = 0f; uz = dirX;
+            } else {
+                ux = 0f; uy = dirZ; uz = -dirY;
+            }
+            float uLen = (float) Math.sqrt(ux * ux + uy * uy + uz * uz);
+            ux /= uLen; uy /= uLen; uz /= uLen;
+
+            float vx = dirY * uz - dirZ * uy;
+            float vy = dirZ * ux - dirX * uz;
+            float vz = dirX * uy - dirY * ux;
+
+            int baseVert = vIdx / 3;
+
+            int capACenter = baseVert;
+            vertices[vIdx] = ax; vertices[vIdx + 1] = ay; vertices[vIdx + 2] = az;
+            normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
+            vIdx += 3;
+
+            int capARimBase = baseVert + 1;
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                vertices[vIdx] = ax + radius * (AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx);
+                vertices[vIdx + 1] = ay + radius * (AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy);
+                vertices[vIdx + 2] = az + radius * (AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz);
+                normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
+                vIdx += 3;
+            }
+
+            int bodyRingABase = baseVert + 7;
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                float rx = AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx;
+                float ry = AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy;
+                float rz = AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz;
+                vertices[vIdx] = ax + radius * rx; vertices[vIdx + 1] = ay + radius * ry; vertices[vIdx + 2] = az + radius * rz;
+                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
+                vIdx += 3;
+            }
+
+            int bodyRingBBase = baseVert + 13;
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                float rx = AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx;
+                float ry = AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy;
+                float rz = AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz;
+                vertices[vIdx] = bx + radius * rx; vertices[vIdx + 1] = by + radius * ry; vertices[vIdx + 2] = bz + radius * rz;
+                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
+                vIdx += 3;
+            }
+
+            int capBCenter = baseVert + 19;
+            vertices[vIdx] = bx; vertices[vIdx + 1] = by; vertices[vIdx + 2] = bz;
+            normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
+            vIdx += 3;
+
+            int capBRimBase = baseVert + 20;
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                vertices[vIdx] = bx + radius * (AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx);
+                vertices[vIdx + 1] = by + radius * (AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy);
+                vertices[vIdx + 2] = bz + radius * (AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz);
+                normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
+                vIdx += 3;
+            }
+
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                int next = (j + 1) % AnariMath.LINE_SIDES;
+                indices[iIdx++] = capACenter; indices[iIdx++] = capARimBase + next; indices[iIdx++] = capARimBase + j;
+            }
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                int next = (j + 1) % AnariMath.LINE_SIDES;
+                indices[iIdx++] = bodyRingABase + j; indices[iIdx++] = bodyRingABase + next; indices[iIdx++] = bodyRingBBase + j;
+                indices[iIdx++] = bodyRingABase + next; indices[iIdx++] = bodyRingBBase + next; indices[iIdx++] = bodyRingBBase + j;
+            }
+            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
+                int next = (j + 1) % AnariMath.LINE_SIDES;
+                indices[iIdx++] = capBCenter; indices[iIdx++] = capBRimBase + j; indices[iIdx++] = capBRimBase + next;
+            }
+        }
+
+        ctx.addBounds(vertices, m);
+
+        MemorySegment vSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
+        Array1D vArray = ctx.device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
+        vArray.commit();
+
+        MemorySegment iSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = ctx.device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.UINT32_VEC3, totalTris);
+        iArray.commit();
+
+        Geometry.Triangle geom = ctx.device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, normals);
+        Array1D nArray = ctx.device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
+        nArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+        ctx.keepAlive.add(nArray);
+
+        geom.commit();
+        ctx.keepAlive.add(vArray);
+        ctx.keepAlive.add(iArray);
+        ctx.keepAlive.add(geom);
+        return geom;
+    }
+}
+
+class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements AnariNode {
+    private final org.web3d.x3d.jsail.Rendering.LineSet delegate;
+
+    public AnariLineSet() { this.delegate = null; }
+    public AnariLineSet(org.web3d.x3d.jsail.Rendering.LineSet delegate) { this.delegate = delegate; }
+
+    @Override
+    public void render(AnariContext ctx, float[] parentTransform, Map<String, Object> protoArgs) {
+        renderLines(ctx, parentTransform, null, null);
+    }
+
+    public void renderLines(AnariContext ctx, float[] m, Object mat, Object app) {
+        try {
+            Object ls = (delegate != null) ? delegate : this;
+            Object colorNode = null;
+            for (String method : List.of("getColor", "getColorList")) {
+                try { colorNode = ctx.resolveUse(ls.getClass().getMethod(method).invoke(ls)); if (colorNode != null) break; } catch (Exception ignored) {}
+            }
+            float[] colors = (colorNode != null) ? X3DTypeAdapter.asFloatArray(colorNode, "getColor") : null;
+            if (colors == null && colorNode != null) {
+                colors = X3DTypeAdapter.asFloatArray(colorNode, "getPoint");
+            }
+            int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
+            boolean hasColor = (colors != null && colors.length >= colorStride);
+
+            Object coord = null;
+            for (String method : List.of("getCoord", "getCoordList")) {
+                try { coord = ctx.resolveUse(ls.getClass().getMethod(method).invoke(ls)); if (coord != null) break; } catch (Exception ignored) {}
+            }
+            float[] pts = (coord == null) ? null : X3DTypeAdapter.asFloatArray(coord, "getPoint");
+            if (pts == null || pts.length < 6) return;
+            int nverts = pts.length / 3;
+
+            int[] vc = X3DTypeAdapter.asIntArray(ls, "getVertexCount");
+            boolean colorPerVertex = X3DTypeAdapter.asBoolean(ls, "getColorPerVertex", true);
+
+            float lineWidthScale = 1.0f;
+            if (app != null) {
+                try {
+                    Object lp = app.getClass().getMethod("getLineProperties").invoke(app);
+                    lp = ctx.resolveUse(lp);
+                    if (lp != null) {
+                        lineWidthScale = (float) X3DTypeAdapter.asDouble(lp, "getLinewidthScaleFactor", 1.0);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            float[] defaultLineCol = null;
+            if (mat != null) {
+                float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
+                float[] dc = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
+                if (ec != null && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
+                    defaultLineCol = ctx.displayColor(ec[0], ec[1], ec[2]);
+                } else if (dc != null && (dc[0] > 0f || dc[1] > 0f || dc[2] > 0f)) {
+                    defaultLineCol = ctx.displayColor(dc[0], dc[1], dc[2]);
+                }
+            }
+            if (defaultLineCol == null) {
+                defaultLineCol = ctx.displayColor(1f, 1f, 1f);
+            }
+
+            List<AnariLineHelper.LineSegmentDef> segments = new ArrayList<>();
+            if (vc == null || vc.length == 0) {
+                for (int i = 0; i < nverts - 1; i++) {
+                    float[] c0 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i, colorStride, ctx) : (hasColor ? AnariLineHelper.getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
+                    float[] c1 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i + 1, colorStride, ctx) : c0;
+                    segments.add(new AnariLineHelper.LineSegmentDef(i, i + 1, c0, c1));
+                }
+            } else {
+                int vOffset = 0;
+                for (int poly = 0; poly < vc.length; poly++) {
+                    int count = vc[poly];
+                    for (int i = 0; i < count - 1; i++) {
+                        int p0 = vOffset + i;
+                        int p1 = vOffset + i + 1;
+                        if (p0 < nverts && p1 < nverts) {
+                            float[] c0 = defaultLineCol, c1 = defaultLineCol;
+                            if (hasColor) {
+                                if (colorPerVertex) {
+                                    c0 = AnariLineHelper.getColorAt(colors, p0, colorStride, ctx);
+                                    c1 = AnariLineHelper.getColorAt(colors, p1, colorStride, ctx);
+                                } else {
+                                    c0 = AnariLineHelper.getColorAt(colors, poly, colorStride, ctx);
+                                    c1 = c0;
+                                }
+                            }
+                            segments.add(new AnariLineHelper.LineSegmentDef(p0, p1, c0, c1));
+                        }
+                    }
+                    vOffset += count;
+                }
+            }
+            if (segments.isEmpty()) return;
+
+            AnariLineHelper.renderSegments(ctx, pts, segments, m, defaultLineCol, lineWidthScale);
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+}
+
+class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet implements AnariNode {
+    private final org.web3d.x3d.jsail.Rendering.IndexedLineSet delegate;
+
+    public AnariIndexedLineSet() { this.delegate = null; }
+    public AnariIndexedLineSet(org.web3d.x3d.jsail.Rendering.IndexedLineSet delegate) { this.delegate = delegate; }
+
+    @Override
+    public void render(AnariContext ctx, float[] parentTransform, Map<String, Object> protoArgs) {
+        renderLines(ctx, parentTransform, null, null);
+    }
+
+    public void renderLines(AnariContext ctx, float[] m, Object mat) {
+        renderLines(ctx, m, mat, null);
+    }
+
+    public void renderLines(AnariContext ctx, float[] m, Object mat, Object app) {
+        try {
+            Object ils = (delegate != null) ? delegate : this;
+            Object colorNode = null;
+            for (String method : List.of("getColor", "getColorList")) {
+                try { colorNode = ctx.resolveUse(ils.getClass().getMethod(method).invoke(ils)); if (colorNode != null) break; } catch (Exception ignored) {}
+            }
+            float[] colors = (colorNode != null) ? X3DTypeAdapter.asFloatArray(colorNode, "getColor") : null;
+            if (colors == null && colorNode != null) {
+                colors = X3DTypeAdapter.asFloatArray(colorNode, "getPoint");
+            }
+            int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
+            boolean hasColor = (colors != null && colors.length >= colorStride);
+
+            Object coord = null;
+            for (String method : List.of("getCoord", "getCoordList")) {
+                try { coord = ctx.resolveUse(ils.getClass().getMethod(method).invoke(ils)); if (coord != null) break; } catch (Exception ignored) {}
+            }
+            float[] pts = (coord == null) ? null : X3DTypeAdapter.asFloatArray(coord, "getPoint");
+            if (pts == null || pts.length < 6) return;
+            int nverts = pts.length / 3;
+
+            int[] ci = X3DTypeAdapter.asIntArray(ils, "getCoordIndex");
+            int[] colorIndex = X3DTypeAdapter.asIntArray(ils, "getColorIndex");
+            boolean colorPerVertex = X3DTypeAdapter.asBoolean(ils, "getColorPerVertex", true);
+
+            float lineWidthScale = 1.0f;
+            if (app != null) {
+                try {
+                    Object lp = app.getClass().getMethod("getLineProperties").invoke(app);
+                    lp = ctx.resolveUse(lp);
+                    if (lp != null) {
+                        lineWidthScale = (float) X3DTypeAdapter.asDouble(lp, "getLinewidthScaleFactor", 1.0);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            float[] defaultLineCol = null;
+            if (mat != null) {
+                float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
+                float[] dc = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
+                if (ec != null && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
+                    defaultLineCol = ctx.displayColor(ec[0], ec[1], ec[2]);
+                } else if (dc != null && (dc[0] > 0f || dc[1] > 0f || dc[2] > 0f)) {
+                    defaultLineCol = ctx.displayColor(dc[0], dc[1], dc[2]);
+                }
+            }
+            if (defaultLineCol == null) {
+                defaultLineCol = ctx.displayColor(1f, 1f, 1f);
+            }
+
+            List<AnariLineHelper.LineSegmentDef> segments = new ArrayList<>();
+            if (ci == null || ci.length == 0) {
+                for (int i = 0; i < nverts - 1; i++) {
+                    float[] c0 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i, colorStride, ctx) : (hasColor ? AnariLineHelper.getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
+                    float[] c1 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i + 1, colorStride, ctx) : c0;
+                    segments.add(new AnariLineHelper.LineSegmentDef(i, i + 1, c0, c1));
+                }
+            } else {
+                int prevCoord = -1, prevColorIdx = -1, currentPolyline = 0;
+                int segCount = 0;
+                for (int i = 0; i < ci.length; i++) {
+                    int coordIdx = ci[i];
+                    int colIdx = (colorIndex != null && i < colorIndex.length) ? colorIndex[i] : coordIdx;
+                    if (coordIdx < 0) {
+                        if (prevCoord != -1) currentPolyline++;
+                        prevCoord = -1;
+                        prevColorIdx = -1;
+                    } else {
+                        if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
+                            float[] c0 = defaultLineCol, c1 = defaultLineCol;
+                            if (hasColor) {
+                                int numColors = colors.length / colorStride;
+                                if (colorIndex == null && numColors < nverts) {
+                                    c0 = AnariLineHelper.getColorAt(colors, segCount % numColors, colorStride, ctx);
+                                    c1 = c0;
+                                } else if (colorPerVertex) {
+                                    c0 = AnariLineHelper.getColorAt(colors, prevColorIdx, colorStride, ctx);
+                                    c1 = AnariLineHelper.getColorAt(colors, colIdx, colorStride, ctx);
+                                } else {
+                                    int pCol = (colorIndex != null && currentPolyline < colorIndex.length) ? colorIndex[currentPolyline] : currentPolyline;
+                                    c0 = AnariLineHelper.getColorAt(colors, pCol, colorStride, ctx);
+                                    c1 = c0;
+                                }
+                            }
+                            segments.add(new AnariLineHelper.LineSegmentDef(prevCoord, coordIdx, c0, c1));
+                            segCount++;
+                        }
+                        prevCoord = coordIdx;
+                        prevColorIdx = colIdx;
+                    }
+                }
+            }
+            if (segments.isEmpty()) return;
+
+            AnariLineHelper.renderSegments(ctx, pts, segments, m, defaultLineCol, lineWidthScale);
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+}
+
+// ============================================================================
+// NURBS PATCH SURFACE IMPLEMENTATION (DE BOOR EVALUATION & ANARI GEOMETRY)
+// ============================================================================
+
+class AnariNurbsPatchSurface extends org.web3d.x3d.jsail.NURBS.NurbsPatchSurface implements AnariGeometry, AnariNode {
+    private final Object delegate;
+
+    public AnariNurbsPatchSurface() { this.delegate = null; }
+    public AnariNurbsPatchSurface(Object delegate) { this.delegate = delegate; }
+
+    @Override
+    public boolean hasVertexColors() { return false; }
+
+    @Override
+    public void render(AnariContext ctx, float[] parentTransform, Map<String, Object> protoArgs) {
+        try {
+            Geometry.Triangle geom = buildGeometry(ctx, parentTransform, protoArgs);
+            if (geom == null) return;
+            Surface surface = ctx.device.newSurface().setGeometry(geom).setMaterial(ctx.defaultMaterial);
+            surface.commit();
+            ctx.keepAlive.add(surface);
+
+            Group group = ctx.device.newGroup();
+            Array1D surfArray = ctx.device.newArray1D(List.of(surface), DataType.SURFACE);
+            surfArray.commit();
+            group.setSurface(surfArray);
+            group.commit();
+            ctx.keepAlive.add(surfArray);
+            ctx.keepAlive.add(group);
+
+            Instance instance = ctx.device.newInstance(Instance.SubType.TRANSFORM);
+            instance.setGroup(group);
+            instance.setTransform(parentTransform);
+            instance.commit();
+            ctx.anariInstances.add(instance);
+            ctx.instanceTransforms.put(instance, parentTransform.clone());
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+
+    @Override
+    public Geometry.Triangle buildGeometry(AnariContext ctx, float[] m, Map<String, Object> protoArgs) throws Throwable {
+        Object surf = (delegate != null) ? delegate : this;
+        surf = ctx.resolveUse(surf);
+
+        int uDimension = X3DTypeAdapter.asInt(surf, "getUDimension", 0);
+        int vDimension = X3DTypeAdapter.asInt(surf, "getVDimension", 0);
+        int uOrder = X3DTypeAdapter.asInt(surf, "getUOrder", 3);
+        int vOrder = X3DTypeAdapter.asInt(surf, "getVOrder", 3);
+
+        Object cpNode = null;
+        for (String method : List.of("getControlPoint", "getControlPointList")) {
+            try {
+                cpNode = ctx.resolveUse(surf.getClass().getMethod(method).invoke(surf));
+                if (cpNode != null) break;
+            } catch (Exception ignored) {}
+        }
+        if (cpNode == null) cpNode = protoArgs.get("_skinCoord");
+        float[] pts = (cpNode == null) ? null : X3DTypeAdapter.asFloatArray(cpNode, "getPoint");
+
+        if (pts == null || uDimension < 2 || vDimension < 2 || pts.length < uDimension * vDimension * 3) {
+            return null;
+        }
+
+        double[] uKnot = X3DTypeAdapter.asDoubleArray(surf, "getUKnot");
+        double[] vKnot = X3DTypeAdapter.asDoubleArray(surf, "getVKnot");
+        if (uKnot == null || uKnot.length < uDimension + uOrder) {
+            uKnot = generateDefaultKnots(uDimension, uOrder);
+        }
+        if (vKnot == null || vKnot.length < vDimension + vOrder) {
+            vKnot = generateDefaultKnots(vDimension, vOrder);
+        }
+
+        double[] weights = X3DTypeAdapter.asDoubleArray(surf, "getWeight");
+        boolean solid = X3DTypeAdapter.asBoolean(surf, "getSolid", true);
+
+        int uTess = X3DTypeAdapter.asInt(surf, "getUTessellation", 0);
+        int vTess = X3DTypeAdapter.asInt(surf, "getVTessellation", 0);
+
+        int stepsU;
+        if (uTess > 0) {
+            stepsU = Math.max(uTess, 4);
+        } else if (uTess < 0) {
+            int spans = Math.max(1, uDimension - uOrder + 1);
+            stepsU = Math.max(Math.abs(uTess) * spans, 4);
+        } else {
+            stepsU = Math.max(uDimension * 2, 60);
+        }
+
+        int stepsV;
+        if (vTess > 0) {
+            stepsV = Math.max(vTess, 4);
+
+        } else if (vTess < 0) {
+            int spans = Math.max(1, vDimension - vOrder + 1);
+            stepsV = Math.max(Math.abs(vTess) * spans, 4);
+        } else {
+            stepsV = Math.max(vDimension * 4, 16);
+        }
+
+        stepsU = Math.min(stepsU, 500);
+        stepsV = Math.min(stepsV, 500);
+
+        int gridVerts = (stepsU + 1) * (stepsV + 1);
+        float[] gridPos = new float[gridVerts * 3];
+        float[] gridNorm = new float[gridVerts * 3];
+        float[] gridUV = new float[gridVerts * 2];
+
+        double uMin = uKnot[uOrder - 1];
+        double uMax = uKnot[uDimension];
+        double vMin = vKnot[vOrder - 1];
+        double vMax = vKnot[vDimension];
+        if (uMax <= uMin) { uMin = uKnot[0]; uMax = uKnot[uKnot.length - 1]; }
+        if (vMax <= vMin) { vMin = vKnot[0]; vMax = vKnot[vKnot.length - 1]; }
+        if (uMax <= uMin) { uMin = 0.0; uMax = 1.0; }
+        if (vMax <= vMin) { vMin = 0.0; vMax = 1.0; }
+
+        double[] uBasis = new double[uOrder];
+        double[] vBasis = new double[vOrder];
+
+        for (int iv = 0; iv <= stepsV; iv++) {
+            double vFrac = (double) iv / stepsV;
+            double v = vMin + vFrac * (vMax - vMin);
+            int vSpan = findSpan(vDimension - 1, vOrder - 1, v, vKnot);
+            basisFuns(vSpan, v, vOrder - 1, vKnot, vBasis);
+
+            for (int iu = 0; iu <= stepsU; iu++) {
+                double uFrac = (double) iu / stepsU;
+                double u = uMin + uFrac * (uMax - uMin);
+                int uSpan = findSpan(uDimension - 1, uOrder - 1, u, uKnot);
+                basisFuns(uSpan, u, uOrder - 1, uKnot, uBasis);
+
+                double x = 0.0, y = 0.0, z = 0.0, w = 0.0;
+                for (int s = 0; s < vOrder; s++) {
+                    int j = vSpan - (vOrder - 1) + s;
+                    double vB = vBasis[s];
+                    for (int r = 0; r < uOrder; r++) {
+                        int i = uSpan - (uOrder - 1) + r;
+                        double uB = uBasis[r];
+                        double b = uB * vB;
+                        int cpIdx = i + j * uDimension;
+                        double wt = (weights != null && cpIdx < weights.length) ? weights[cpIdx] : 1.0;
+                        double bw = b * wt;
+                        int ptIdx = cpIdx * 3;
+                        x += bw * pts[ptIdx];
+                        y += bw * pts[ptIdx + 1];
+                        z += bw * pts[ptIdx + 2];
+                        w += bw;
+                    }
+                }
+                if (Math.abs(w) > 1e-12) {
+                    x /= w; y /= w; z /= w;
+                }
+
+                int vIdx = (iv * (stepsU + 1) + iu) * 3;
+                gridPos[vIdx] = (float) x;
+                gridPos[vIdx + 1] = (float) y;
+                gridPos[vIdx + 2] = (float) z;
+
+                int uvIdx = (iv * (stepsU + 1) + iu) * 2;
+                gridUV[uvIdx] = (float) uFrac;
+                gridUV[uvIdx + 1] = (float) vFrac;
+            }
+        }
+
+        for (int iv = 0; iv <= stepsV; iv++) {
+            int prevV = Math.max(0, iv - 1);
+            int nextV = Math.min(stepsV, iv + 1);
+            for (int iu = 0; iu <= stepsU; iu++) {
+                int prevU = Math.max(0, iu - 1);
+                int nextU = Math.min(stepsU, iu + 1);
+
+                int idxP_U0 = (iv * (stepsU + 1) + prevU) * 3;
+                int idxP_U1 = (iv * (stepsU + 1) + nextU) * 3;
+                float duX = gridPos[idxP_U1] - gridPos[idxP_U0];
+                float duY = gridPos[idxP_U1 + 1] - gridPos[idxP_U0 + 1];
+                float duZ = gridPos[idxP_U1 + 2] - gridPos[idxP_U0 + 2];
+
+                int idxP_V0 = (prevV * (stepsU + 1) + iu) * 3;
+                int idxP_V1 = (nextV * (stepsU + 1) + iu) * 3;
+                float dvX = gridPos[idxP_V1] - gridPos[idxP_V0];
+                float dvY = gridPos[idxP_V1 + 1] - gridPos[idxP_V0 + 1];
+                float dvZ = gridPos[idxP_V1 + 2] - gridPos[idxP_V0 + 2];
+
+                float nx = duY * dvZ - duZ * dvY;
+                float ny = duZ * dvX - duX * dvZ;
+                float nz = duX * dvY - duY * dvX;
+                float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+                if (len > 1e-7f) { nx /= len; ny /= len; nz /= len; }
+                else { nx = 0f; ny = 1f; nz = 0f; }
+
+                int nIdx = (iv * (stepsU + 1) + iu) * 3;
+                gridNorm[nIdx] = nx;
+                gridNorm[nIdx + 1] = ny;
+                gridNorm[nIdx + 2] = nz;
+            }
+        }
+
+        int quads = stepsU * stepsV;
+        int totalTris = solid ? (quads * 2) : (quads * 4);
+        int totalVerts = solid ? gridVerts : (gridVerts * 2);
+
+        float[] finalPos = new float[totalVerts * 3];
+        float[] finalNorm = new float[totalVerts * 3];
+        float[] finalUV = new float[totalVerts * 2];
+        float[] baseUVs = new float[totalVerts * 2];
+        int[] indices = new int[totalTris * 3];
+
+        System.arraycopy(gridPos, 0, finalPos, 0, gridVerts * 3);
+        System.arraycopy(gridNorm, 0, finalNorm, 0, gridVerts * 3);
+        System.arraycopy(gridUV, 0, finalUV, 0, gridVerts * 2);
+        System.arraycopy(gridUV, 0, baseUVs, 0, gridVerts * 2);
+
+        if (!solid) {
+            int offV = gridVerts * 3;
+            int offUV = gridVerts * 2;
+            for (int i = 0; i < gridVerts; i++) {
+                finalPos[offV + i * 3]     = gridPos[i * 3];
+                finalPos[offV + i * 3 + 1] = gridPos[i * 3 + 1];
+                finalPos[offV + i * 3 + 2] = gridPos[i * 3 + 2];
+
+                finalNorm[offV + i * 3]     = -gridNorm[i * 3];
+                finalNorm[offV + i * 3 + 1] = -gridNorm[i * 3 + 1];
+                finalNorm[offV + i * 3 + 2] = -gridNorm[i * 3 + 2];
+
+                finalUV[offUV + i * 2]     = gridUV[i * 2];
+                finalUV[offUV + i * 2 + 1] = gridUV[i * 2 + 1];
+                baseUVs[offUV + i * 2]     = gridUV[i * 2];
+                baseUVs[offUV + i * 2 + 1] = gridUV[i * 2 + 1];
+            }
+        }
+
+        int iIdx = 0;
+        for (int iv = 0; iv < stepsV; iv++) {
+            for (int iu = 0; iu < stepsU; iu++) {
+                int p00 = iv * (stepsU + 1) + iu;
+                int p10 = iv * (stepsU + 1) + iu + 1;
+                int p11 = (iv + 1) * (stepsU + 1) + iu + 1;
+                int p01 = (iv + 1) * (stepsU + 1) + iu;
+
+                indices[iIdx++] = p00; indices[iIdx++] = p10; indices[iIdx++] = p11;
+                indices[iIdx++] = p00; indices[iIdx++] = p11; indices[iIdx++] = p01;
+
+                if (!solid) {
+                    int b00 = p00 + gridVerts;
+                    int b10 = p10 + gridVerts;
+                    int b11 = p11 + gridVerts;
+                    int b01 = p01 + gridVerts;
+
+                    indices[iIdx++] = b00; indices[iIdx++] = b11; indices[iIdx++] = b10;
+                    indices[iIdx++] = b00; indices[iIdx++] = b01; indices[iIdx++] = b11;
+                }
+            }
+        }
+
+        Object activeTT = protoArgs.get("_activeTextureTransform");
+        if (activeTT instanceof X3DAnariHandler.TextureTransformAnim) {
+            AnariMath.applyTextureTransform(finalUV, (X3DAnariHandler.TextureTransformAnim) activeTT);
+        }
+
+        ctx.addBounds(finalPos, m);
+
+        MemorySegment vSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, finalPos);
+        Array1D vArray = ctx.device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
+        vArray.commit();
+
+        MemorySegment iSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = ctx.device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.UINT32_VEC3, totalTris);
+        iArray.commit();
+
+        Geometry.Triangle geom = ctx.device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, finalNorm);
+        Array1D nArray = ctx.device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
+        nArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+        ctx.keepAlive.add(nArray);
+
+        MemorySegment uvSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, finalUV);
+        Array1D uvArray = ctx.device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC2, totalVerts);
+        uvArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, uvArray);
+        ctx.keepAlive.add(uvArray);
+
+        if (activeTT instanceof X3DAnariHandler.TextureTransformAnim) {
+            X3DAnariHandler.TextureTransformAnim ttAnim = (X3DAnariHandler.TextureTransformAnim) activeTT;
+            X3DAnariHandler.TextureTransformBinding ttb = new X3DAnariHandler.TextureTransformBinding(ctx, ttAnim, geom, uvSeg, uvArray, baseUVs);
+            ctx.textureBindings.add(ttb);
+            ttb.apply(ctx.device);
+        }
+
+        geom.commit();
+        ctx.keepAlive.add(vArray);
+        ctx.keepAlive.add(iArray);
+        ctx.keepAlive.add(geom);
+        return geom;
+    }
+
+    static double[] generateDefaultKnots(int dim, int order) {
+        int nKnots = dim + order;
+        double[] knots = new double[nKnots];
+        int numInterior = dim - order;
+        for (int i = 0; i < order; i++) knots[i] = 0.0;
+        for (int i = 1; i <= numInterior; i++) {
+            knots[order - 1 + i] = (double) i / (numInterior + 1);
+        }
+        for (int i = dim; i < nKnots; i++) knots[i] = 1.0;
+        return knots;
+    }
+
+    static int findSpan(int n, int p, double u, double[] U) {
+        if (u >= U[n + 1]) return n;
+        if (u <= U[p]) return p;
+        int low = p;
+        int high = n + 1;
+        int mid = (low + high) / 2;
+        int guard = 0;
+        while ((u < U[mid] || u >= U[mid + 1]) && guard++ < 1000) {
+            if (u < U[mid]) high = mid;
+            else low = mid;
+            mid = (low + high) / 2;
+        }
+        return mid;
+    }
+
+    static void basisFuns(int span, double u, int p, double[] U, double[] N) {
+        N[0] = 1.0;
+        double[] left = new double[p + 1];
+        double[] right = new double[p + 1];
+        for (int j = 1; j <= p; j++) {
+            left[j] = u - U[span + 1 - j];
+            right[j] = U[span + j] - u;
+            double saved = 0.0;
+            for (int r = 0; r < j; r++) {
+                double denom = right[r + 1] + left[j - r];
+                if (denom != 0.0) {
+                    double temp = N[r] / denom;
+                    N[r] = saved + right[r + 1] * temp;
+                    saved = left[j - r] * temp;
+                } else {
+                    N[r] = saved;
+                    saved = 0.0;
+                }
+            }
+            N[j] = saved;
+        }
+    }
+}
+
 class AnariIndexedFaceSet extends org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet implements AnariGeometry {
     private final org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet delegate;
     private boolean hasColors = false;
@@ -1867,9 +2672,6 @@ class AnariIndexedFaceSet extends org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet 
             Array1D cArray = ctx.device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC4, totalVerts);
             cArray.commit();
             ctx.setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
-            // attribute0 is reserved for TEXCOORD_0.  Older code also installed
-            // vertex colors there, which silently replaced the UV stream whenever
-            // a textured mesh also contained a Color/ColorRGBA node.
             if (!hasUV) {
                 ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, cArray);
             }
@@ -1936,304 +2738,6 @@ class AnariIndexedFaceSet extends org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet 
     }
 }
 
-class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet implements AnariNode {
-    private final org.web3d.x3d.jsail.Rendering.IndexedLineSet delegate;
-
-    public AnariIndexedLineSet() { this.delegate = null; }
-    public AnariIndexedLineSet(org.web3d.x3d.jsail.Rendering.IndexedLineSet delegate) { this.delegate = delegate; }
-
-    @Override
-    public void render(AnariContext ctx, float[] parentTransform, Map<String, Object> protoArgs) {
-        renderLines(ctx, parentTransform, null);
-    }
-
-    public void renderLines(AnariContext ctx, float[] m, Object mat) {
-        try {
-            Object ils = (delegate != null) ? delegate : this;
-            Object colorNode = null;
-            for (String method : List.of("getColor", "getColorList")) {
-                try { colorNode = ctx.resolveUse(ils.getClass().getMethod(method).invoke(ils)); if (colorNode != null) break; } catch (Exception ignored) {}
-            }
-            float[] colors = (colorNode != null) ? X3DTypeAdapter.asFloatArray(colorNode, "getColor") : null;
-            if (colors == null && colorNode != null) {
-                colors = X3DTypeAdapter.asFloatArray(colorNode, "getPoint");
-            }
-            int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
-            boolean hasColor = (colors != null && colors.length >= colorStride);
-
-            Object coord = null;
-            for (String method : List.of("getCoord", "getCoordList")) {
-                try { coord = ctx.resolveUse(ils.getClass().getMethod(method).invoke(ils)); if (coord != null) break; } catch (Exception ignored) {}
-            }
-            float[] pts = (coord == null) ? null : X3DTypeAdapter.asFloatArray(coord, "getPoint");
-            if (pts == null || pts.length < 6) return;
-            int nverts = pts.length / 3;
-
-            int[] ci = X3DTypeAdapter.asIntArray(ils, "getCoordIndex");
-            int[] colorIndex = X3DTypeAdapter.asIntArray(ils, "getColorIndex");
-            boolean colorPerVertex = X3DTypeAdapter.asBoolean(ils, "getColorPerVertex", true);
-
-            float[] defaultLineCol = null;
-            if (mat != null) {
-                float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
-                float[] dc = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
-                if (ec != null && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) {
-                    defaultLineCol = ctx.displayColor(ec[0], ec[1], ec[2]);
-                } else if (dc != null && (dc[0] > 0f || dc[1] > 0f || dc[2] > 0f)) {
-                    defaultLineCol = ctx.displayColor(dc[0], dc[1], dc[2]);
-                }
-            }
-            if (defaultLineCol == null) {
-                defaultLineCol = ctx.displayColor(1f, 1f, 1f);
-            }
-
-            List<LineSegmentDef> segments = new ArrayList<>();
-            if (ci == null || ci.length == 0) {
-                for (int i = 0; i < nverts - 1; i++) {
-                    float[] c0 = (hasColor && colorPerVertex) ? getColorAt(colors, i, colorStride, ctx) : (hasColor ? getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
-                    float[] c1 = (hasColor && colorPerVertex) ? getColorAt(colors, i + 1, colorStride, ctx) : c0;
-                    segments.add(new LineSegmentDef(i, i + 1, c0, c1));
-                }
-            } else {
-                int prevCoord = -1, prevColorIdx = -1, currentPolyline = 0;
-                int segCount = 0;
-                for (int i = 0; i < ci.length; i++) {
-                    int coordIdx = ci[i];
-                    int colIdx = (colorIndex != null && i < colorIndex.length) ? colorIndex[i] : coordIdx;
-                    if (coordIdx < 0) {
-                        if (prevCoord != -1) currentPolyline++;
-                        prevCoord = -1;
-                        prevColorIdx = -1;
-                    } else {
-                        if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
-                            float[] c0 = defaultLineCol, c1 = defaultLineCol;
-                            if (hasColor) {
-                                int numColors = colors.length / colorStride;
-                                if (colorIndex == null && numColors < nverts) {
-                                    c0 = getColorAt(colors, segCount % numColors, colorStride, ctx);
-                                    c1 = c0;
-                                } else if (colorPerVertex) {
-                                    c0 = getColorAt(colors, prevColorIdx, colorStride, ctx);
-                                    c1 = getColorAt(colors, colIdx, colorStride, ctx);
-                                } else {
-                                    int pCol = (colorIndex != null && currentPolyline < colorIndex.length) ? colorIndex[currentPolyline] : currentPolyline;
-                                    c0 = getColorAt(colors, pCol, colorStride, ctx);
-                                    c1 = c0;
-                                }
-                            }
-                            segments.add(new LineSegmentDef(prevCoord, coordIdx, c0, c1));
-                            segCount++;
-                        }
-                        prevCoord = coordIdx;
-                        prevColorIdx = colIdx;
-                    }
-                }
-            }
-            if (segments.isEmpty()) return;
-
-            List<Surface> surfaces = new ArrayList<>();
-            for (LineSegmentDef seg : segments) {
-                Geometry.Triangle geom = buildTubeGeometry(ctx, pts, List.of(seg), m);
-                if (geom == null) continue;
-
-                float[] col = seg.c0 != null ? seg.c0 : defaultLineCol;
-                Material.Matte segMat = ctx.device.newMaterial(Material.SubType.MATTE);
-                segMat.setColor(col[0], col[1], col[2]);
-                segMat.commit();
-                ctx.keepAlive.add(segMat);
-
-                Surface surface = ctx.device.newSurface().setGeometry(geom).setMaterial(segMat);
-                surface.commit();
-                ctx.keepAlive.add(surface);
-                surfaces.add(surface);
-            }
-
-            if (!surfaces.isEmpty()) {
-                Group group = ctx.device.newGroup();
-                Array1D surfArray = ctx.device.newArray1D(surfaces, DataType.SURFACE);
-                surfArray.commit();
-                group.setSurface(surfArray);
-                group.commit();
-                ctx.keepAlive.add(surfArray);
-                ctx.keepAlive.add(group);
-
-                Instance instance = ctx.device.newInstance(Instance.SubType.TRANSFORM);
-                instance.setGroup(group);
-                instance.setTransform(m);
-                instance.commit();
-                ctx.anariInstances.add(instance);
-                ctx.instanceTransforms.put(instance, m.clone());
-            }
-        } catch (Throwable t) {
-            t.printStackTrace();
-        }
-    }
-
-    private static float[] getColorAt(float[] colors, int cIdx, int stride, AnariContext ctx) {
-        if (colors == null || cIdx < 0 || (cIdx * stride + 2) >= colors.length) return null;
-        return ctx.displayColor(colors[cIdx * stride], colors[cIdx * stride + 1], colors[cIdx * stride + 2]);
-    }
-
-    static class LineSegmentDef {
-        final int p0, p1;
-        final float[] c0, c1;
-        LineSegmentDef(int p0, int p1, float[] c0, float[] c1) {
-            this.p0 = p0; this.p1 = p1; this.c0 = c0; this.c1 = c1;
-        }
-    }
-
-    private static Geometry.Triangle buildTubeGeometry(AnariContext ctx, float[] pts, List<LineSegmentDef> segments, float[] m) throws Throwable {
-        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
-        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
-        for (int i = 0; i + 2 < pts.length; i += 3) {
-            minX = Math.min(minX, pts[i]);   maxX = Math.max(maxX, pts[i]);
-            minY = Math.min(minY, pts[i+1]); maxY = Math.max(maxY, pts[i+1]);
-            minZ = Math.min(minZ, pts[i+2]); maxZ = Math.max(maxZ, pts[i+2]);
-        }
-        float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
-        float diag = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-        float totalSegLen = 0f;
-        int validSegCount = 0;
-        for (LineSegmentDef seg : segments) {
-            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
-            float sx = pts[p1] - pts[p0], sy = pts[p1 + 1] - pts[p0 + 1], sz = pts[p1 + 2] - pts[p0 + 2];
-            float slen = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
-            if (slen > 1e-7f) { totalSegLen += slen; validSegCount++; }
-        }
-        if (validSegCount == 0) return null;
-
-        float avgLen = totalSegLen / validSegCount;
-        float radius = diag > 0f ? diag * 0.002f : 0.005f;
-        if (avgLen > 1e-6f) radius = Math.min(radius, avgLen * 0.05f);
-        if (radius < 1e-5f) radius = (avgLen > 1e-6f) ? avgLen * 0.02f : 0.002f;
-
-        int totalVerts = validSegCount * 26;
-        int totalTris = validSegCount * 24;
-
-        float[] vertices = new float[totalVerts * 3];
-        float[] normals = new float[totalVerts * 3];
-        int[] indices = new int[totalTris * 3];
-
-        int vIdx = 0, iIdx = 0;
-
-        for (LineSegmentDef seg : segments) {
-            int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
-            float ax = pts[p0], ay = pts[p0 + 1], az = pts[p0 + 2];
-            float bx = pts[p1], by = pts[p1 + 1], bz = pts[p1 + 2];
-
-            float dirX = bx - ax, dirY = by - ay, dirZ = bz - az;
-            float len = (float) Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-            if (len < 1e-7f) continue;
-
-            dirX /= len; dirY /= len; dirZ /= len;
-
-            float ux, uy, uz;
-            if (Math.abs(dirY) < 0.9f) {
-                ux = -dirZ; uy = 0f; uz = dirX;
-            } else {
-                ux = 0f; uy = dirZ; uz = -dirY;
-            }
-            float uLen = (float) Math.sqrt(ux * ux + uy * uy + uz * uz);
-            ux /= uLen; uy /= uLen; uz /= uLen;
-
-            float vx = dirY * uz - dirZ * uy;
-            float vy = dirZ * ux - dirX * uz;
-            float vz = dirX * uy - dirY * ux;
-
-            int baseVert = vIdx / 3;
-
-            int capACenter = baseVert;
-            vertices[vIdx] = ax; vertices[vIdx + 1] = ay; vertices[vIdx + 2] = az;
-            normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
-            vIdx += 3;
-
-            int capARimBase = baseVert + 1;
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                vertices[vIdx] = ax + radius * (AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx);
-                vertices[vIdx + 1] = ay + radius * (AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy);
-                vertices[vIdx + 2] = az + radius * (AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz);
-                normals[vIdx] = -dirX; normals[vIdx + 1] = -dirY; normals[vIdx + 2] = -dirZ;
-                vIdx += 3;
-            }
-
-            int bodyRingABase = baseVert + 7;
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                float rx = AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx;
-                float ry = AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy;
-                float rz = AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz;
-                vertices[vIdx] = ax + radius * rx; vertices[vIdx + 1] = ay + radius * ry; vertices[vIdx + 2] = az + radius * rz;
-                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
-                vIdx += 3;
-            }
-
-            int bodyRingBBase = baseVert + 13;
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                float rx = AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx;
-                float ry = AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy;
-                float rz = AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz;
-                vertices[vIdx] = bx + radius * rx; vertices[vIdx + 1] = by + radius * ry; vertices[vIdx + 2] = bz + radius * rz;
-                normals[vIdx] = rx; normals[vIdx + 1] = ry; normals[vIdx + 2] = rz;
-                vIdx += 3;
-            }
-
-            int capBCenter = baseVert + 19;
-            vertices[vIdx] = bx; vertices[vIdx + 1] = by; vertices[vIdx + 2] = bz;
-            normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
-            vIdx += 3;
-
-            int capBRimBase = baseVert + 20;
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                vertices[vIdx] = bx + radius * (AnariMath.LINE_COS[j] * ux + AnariMath.LINE_SIN[j] * vx);
-                vertices[vIdx + 1] = by + radius * (AnariMath.LINE_COS[j] * uy + AnariMath.LINE_SIN[j] * vy);
-                vertices[vIdx + 2] = bz + radius * (AnariMath.LINE_COS[j] * uz + AnariMath.LINE_SIN[j] * vz);
-                normals[vIdx] = dirX; normals[vIdx + 1] = dirY; normals[vIdx + 2] = dirZ;
-                vIdx += 3;
-            }
-
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                int next = (j + 1) % AnariMath.LINE_SIDES;
-                indices[iIdx++] = capACenter; indices[iIdx++] = capARimBase + next; indices[iIdx++] = capARimBase + j;
-            }
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                int next = (j + 1) % AnariMath.LINE_SIDES;
-                indices[iIdx++] = bodyRingABase + j; indices[iIdx++] = bodyRingABase + next; indices[iIdx++] = bodyRingBBase + j;
-                indices[iIdx++] = bodyRingABase + next; indices[iIdx++] = bodyRingBBase + next; indices[iIdx++] = bodyRingBBase + j;
-            }
-            for (int j = 0; j < AnariMath.LINE_SIDES; j++) {
-                int next = (j + 1) % AnariMath.LINE_SIDES;
-                indices[iIdx++] = capBCenter; indices[iIdx++] = capBRimBase + j; indices[iIdx++] = capBRimBase + next;
-            }
-        }
-
-        ctx.addBounds(vertices, m);
-
-        MemorySegment vSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
-        Array1D vArray = ctx.device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
-        vArray.commit();
-
-        MemorySegment iSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_INT, indices);
-        Array1D iArray = ctx.device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.UINT32_VEC3, totalTris);
-        iArray.commit();
-
-        Geometry.Triangle geom = ctx.device.newGeometry(Geometry.SubType.TRIANGLE)
-                .setVertexPosition(vArray)
-                .setPrimitiveIndex(iArray);
-
-        MemorySegment nSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, normals);
-        Array1D nArray = ctx.device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, totalVerts);
-        nArray.commit();
-        ctx.setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
-        ctx.keepAlive.add(nArray);
-
-        geom.commit();
-        ctx.keepAlive.add(vArray);
-        ctx.keepAlive.add(iArray);
-        ctx.keepAlive.add(geom);
-        return geom;
-    }
-}
-
 class AnariIndexedTriangleSet implements AnariGeometry {
     private final Object delegate;
     private boolean hasColors = false;
@@ -2248,9 +2752,6 @@ class AnariIndexedTriangleSet implements AnariGeometry {
         Object its = X3DTypeAdapter.unwrapNode(delegate);
         if (its == null) return null;
 
-        // IndexedTriangleSet differs from IndexedFaceSet in one important respect:
-        // index is already a flat list of triangle corners, with three indices per
-        // triangle and no -1 polygon separators.
         int[] index = X3DTypeAdapter.asIntArray(its, "getIndex");
 
         Object coord = null;
@@ -2267,8 +2768,6 @@ class AnariIndexedTriangleSet implements AnariGeometry {
 
         final int nverts = pts.length / 3;
 
-        // X3D IndexedTriangleSet applies texture/color values in coordinate order;
-        // there are no texCoordIndex/colorIndex fields on this node.
         Object tcNode = null;
         for (String method : List.of("getTexCoord", "getTexCoordList")) {
             try {
@@ -2293,10 +2792,6 @@ class AnariIndexedTriangleSet implements AnariGeometry {
         boolean hasColorNode = rawColors != null && rawColors.length >= colorStride;
         this.hasColors = hasColorNode;
 
-        // Build one ANARI vertex for each triangle corner.  This is intentional:
-        // it preserves the one-to-one X3D correspondence needed by UVs, colors,
-        // HAnim skinning and displacers without requiring ANARI indexed attribute
-        // streams with separate index sets.
         List<int[]> tris = new ArrayList<>();
         List<Integer> triFaceId = new ArrayList<>();
         List<float[]> faceNormals = new ArrayList<>();
@@ -2402,8 +2897,6 @@ class AnariIndexedTriangleSet implements AnariGeometry {
             AnariMath.applyTextureTransform(unrolledUV, (X3DAnariHandler.TextureTransformAnim) activeTT);
         }
 
-        // IndexedTriangleSet does not require creaseAngle to define topology, but
-        // use it when X3DJSAIL exposes it so existing smooth-normal behavior is kept.
         float creaseAngle = (float) X3DTypeAdapter.asDouble(its, "getCreaseAngle", 0.0);
         float[] unrolledNormals = AnariMath.computeSmoothNormals(
                 pts, tris, triFaceId, faceNormals, vertFaces, creaseAngle, unrolledToOrigCoord);
@@ -3116,6 +3609,19 @@ class AnariNodeFactory {
             return;
         }
 
+        if (node instanceof org.web3d.x3d.jsail.Rendering.LineSet || cName.equals("LineSet")) {
+            new AnariLineSet((org.web3d.x3d.jsail.Rendering.LineSet) node).render(ctx, parentTransform, protoArgs);
+            return;
+        }
+        if (node instanceof org.web3d.x3d.jsail.Rendering.IndexedLineSet || cName.contains("IndexedLineSet")) {
+            new AnariIndexedLineSet((org.web3d.x3d.jsail.Rendering.IndexedLineSet) node).render(ctx, parentTransform, protoArgs);
+            return;
+        }
+        if (node instanceof org.web3d.x3d.jsail.NURBS.NurbsPatchSurface || cName.equals("NurbsPatchSurface")) {
+            new AnariNurbsPatchSurface(node).render(ctx, parentTransform, protoArgs);
+            return;
+        }
+
         try {
             traverseList(ctx, node.getClass().getMethod("getChildren").invoke(node), parentTransform, protoArgs);
         } catch (Exception ignored) {}
@@ -3125,12 +3631,12 @@ class AnariNodeFactory {
         x3dGeom = X3DTypeAdapter.unwrapNode(x3dGeom);
         if (x3dGeom == null) return null;
         if (x3dGeom instanceof AnariGeometry) return (AnariGeometry) x3dGeom;
+        if (x3dGeom instanceof org.web3d.x3d.jsail.NURBS.NurbsPatchSurface || x3dGeom.getClass().getSimpleName().equals("NurbsPatchSurface")) {
+            return new AnariNurbsPatchSurface(x3dGeom);
+        }
         if (x3dGeom instanceof org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet) {
             return new AnariIndexedFaceSet((org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet) x3dGeom);
         }
-        // IndexedTriangleSet is a Rendering-component geometry node.  Keep this
-        // adapter reflection-friendly so generated X3DJSAIL programs from different
-        // library versions remain source-compatible while still using getIndex().
         if (x3dGeom.getClass().getSimpleName().equals("IndexedTriangleSet")) {
             return new AnariIndexedTriangleSet(x3dGeom);
         }
@@ -3149,7 +3655,16 @@ class AnariNodeFactory {
         return null;
     }
 
-    public static AnariIndexedLineSet adaptLineSet(Object x3dGeom) {
+    public static AnariLineSet adaptLineSet(Object x3dGeom) {
+        x3dGeom = X3DTypeAdapter.unwrapNode(x3dGeom);
+        if (x3dGeom instanceof AnariLineSet) return (AnariLineSet) x3dGeom;
+        if (x3dGeom instanceof org.web3d.x3d.jsail.Rendering.LineSet) {
+            return new AnariLineSet((org.web3d.x3d.jsail.Rendering.LineSet) x3dGeom);
+        }
+        return new AnariLineSet();
+    }
+
+    public static AnariIndexedLineSet adaptIndexedLineSet(Object x3dGeom) {
         x3dGeom = X3DTypeAdapter.unwrapNode(x3dGeom);
         if (x3dGeom instanceof AnariIndexedLineSet) return (AnariIndexedLineSet) x3dGeom;
         if (x3dGeom instanceof org.web3d.x3d.jsail.Rendering.IndexedLineSet) {
@@ -3179,6 +3694,7 @@ class X3DAnariHandler extends AbstractHandler {
     private Device device;
     private Light.Directional headlight;
     private Light.Directional fillLight;
+    private float[] backgroundColor = null;
     private float angleScale = 1f;
     private float lastAz = Float.NaN, lastEl = Float.NaN;
     private boolean built = false;
@@ -3366,8 +3882,6 @@ class X3DAnariHandler extends AbstractHandler {
     }
 
     private void build(Device device) throws Throwable {
-        // Neutral fallback for non-Shape geometry; Shapes receive the richer
-        // deterministic palette above when they lack explicit X3D colors.
         float[] neutral = AnariContext.SWAP_RED_BLUE
             ? new float[]{ 0.28f, 0.24f, 0.20f }
             : new float[]{ 0.20f, 0.24f, 0.28f };
@@ -3412,8 +3926,9 @@ class X3DAnariHandler extends AbstractHandler {
         if (renderer != null) {
             try {
                 renderer.setFloat32("ambientRadiance", AMBIENT_RADIANCE);
+                float[] bg = (backgroundColor != null) ? backgroundColor : new float[]{0f, 0f, 0f, 1f};
                 renderer.set("background", DataType.FLOAT32_VEC4,
-                             sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, 0f, 0f, 0f, 1f));
+                             sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, bg[0], bg[1], bg[2], bg[3]));
                 renderer.commit();
             } catch (Throwable t) { t.printStackTrace(); }
         }
@@ -3459,6 +3974,14 @@ class X3DAnariHandler extends AbstractHandler {
         }
 
         String cName = node.getClass().getSimpleName();
+        if (cName.contains("Background")) {
+            float[] skyColor = X3DTypeAdapter.asFloatArray(node, "getSkyColor");
+            if (skyColor != null && skyColor.length >= 3) {
+                float[] disp = context != null ? context.displayColor(skyColor[0], skyColor[1], skyColor[2]) : new float[]{ skyColor[0], skyColor[1], skyColor[2] };
+                this.backgroundColor = new float[]{ disp[0], disp[1], disp[2], 1.0f };
+            }
+        }
+
         if (cName.contains("ProtoDeclare")) {
             String name = X3DTypeAdapter.asString(node, "getName");
             if (name != null && !name.trim().isEmpty()) protoMap.put(name.trim(), node);

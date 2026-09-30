@@ -69,6 +69,7 @@ public class mobius implements X3DRoots {
         .addMeta(new meta().setName(new SFString("description")).setContent(new SFString("a mobius of 3 NURBS Patch Surfaces"))))
       .setScene(new Scene()
         .addChild(new Background().setSkyColor(new MFColor0().getArray()))
+        .addChild(new Viewpoint().setPosition(new float[] {0f ,0f ,20f }))
         .addChild(new Shape()
           .setGeometry(new NurbsPatchSurface().setVKnot(new MFDouble1().getArray()).setVDimension(3).setWeight(new MFDouble2().getArray()).setSolid(false).setUDimension(91).setUKnot(new MFDouble3().getArray()).setUOrder(4)
             .setControlPoint(new Coordinate().setPoint(new MFVec3f4().getArray()))
