@@ -28,8 +28,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.InvocationTargetException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -49,57 +49,44 @@ public class JanariApp extends Application {
             String which = raw.replaceAll("\\.(java|x3d|json)$", "").replaceAll("/", ".");
 
             net.coderextreme.X3DRoots roots = null;
-	    try {
-	        Class<?> clazz = Class.forName(which);
-	        roots = (net.coderextreme.X3DRoots)clazz.getDeclaredConstructor().newInstance();
-	        modelName = which;
-	    } catch (ClassNotFoundException e) {
-		e.printStackTrace(System.err);
-	    } catch (NoSuchMethodException e) {
-		e.printStackTrace(System.err);
-	    } catch (InstantiationException | IllegalAccessException | InvocationTargetException e) {
-		e.printStackTrace(System.err);
-	    }
-/*
-            switch (which) {
-                case "ArchHalf":
-                    roots = new ArchHalf();
-                    modelName = "ArchHalf";
+            List<String> candidateClasses = List.of(
+                which,
+                "net.coderextreme.data." + which,
+                "net.coderextreme." + which
+            );
+
+            for (String cName : candidateClasses) {
+                try {
+                    Class<?> clazz = Class.forName(cName);
+                    roots = (net.coderextreme.X3DRoots) clazz.getDeclaredConstructor().newInstance();
+                    modelName = cName;
                     break;
-                case "ArtDecoExamples":
-                case "ArtDeco":
-                    roots = new ArtDecoExamples();
-                    modelName = "ArtDecoExamples";
-                    break;
-                case "JinWink":
-                case "Jin":
-                    roots = new JinWink();
-                    modelName = "JinWink";
-                    break;
-                default:
-                    roots = new BoxEm();
-                    which = "BoxEm";
-                    modelName = "BoxEm";
-                    break;
+                } catch (ClassNotFoundException ignored) {
+                } catch (Exception e) {
+                    e.printStackTrace(System.err);
+                }
             }
-*/
-            System.out.println("Loading model: " + which);
+
+            if (roots == null) {
+                System.err.println("Could not load class for: " + which + ". Falling back to BoxEm.");
+                roots = new net.coderextreme.data.BoxEm();
+                modelName = "net.coderextreme.data.BoxEm";
+            }
+
+            System.out.println("Loading model: " + modelName);
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
             X3DAnariHandler handler = new X3DAnariHandler(x3dModel);
             anariPane.setHandler(handler);
 
-            // Discover and enable any built-in animation properties on AnariPane
-            Method enableAnimMethod = null;
             for (String mName : List.of("setAnimated", "startAnimation", "setContinuous", "start")) {
                 try {
-                    enableAnimMethod = anariPane.getClass().getMethod(mName, boolean.class);
+                    Method enableAnimMethod = anariPane.getClass().getMethod(mName, boolean.class);
                     enableAnimMethod.invoke(anariPane, true);
                     System.out.println("Configured AnariPane." + mName + "(true)");
                     break;
                 } catch (Exception ignored) {}
             }
 
-            // JavaFX AnimationTimer continuously requests repaints to drive TimeSensor & Displacers
             AnimationTimer animTimer = new AnimationTimer() {
                 private Method repaintMethod = null;
                 private boolean methodSearched = false;
@@ -108,7 +95,6 @@ public class JanariApp extends Application {
                 public void handle(long now) {
                     if (!methodSearched) {
                         methodSearched = true;
-                        // Search for the public or declared method that triggers rendering
                         for (String mName : List.of("requestRender", "requestRepaint", "renderLater", "repaint", "render")) {
                             try {
                                 repaintMethod = anariPane.getClass().getMethod(mName);
@@ -166,7 +152,6 @@ class X3DAnariHandler extends AbstractHandler {
 
     private final Object x3dModel;
 
-    // Everything ANARI must see stays reachable here until release().
     private final Arena sceneArena = Arena.ofShared();
     private final List<Object> keepAlive = new ArrayList<>();
     private final List<Instance> anariInstances = new ArrayList<>();
@@ -177,12 +162,11 @@ class X3DAnariHandler extends AbstractHandler {
     private final float[] bmax = {-Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE };
     private boolean viewpointSet = false;
 
-    // X3D-style headlight: a directional light that follows the camera.
     private static final float HEADLIGHT_IRRADIANCE = 1.0f;
     private static final float AMBIENT_RADIANCE = 0.25f;
     private Light.Directional headlight;
 
-    // Workarounds for how AnariPane turns the ANARI frame into a JavaFX image.
+    // Compensates for JavaFX image display in AnariPane
     private static final boolean FLIP_Y = true;
     private static final boolean SWAP_RED_BLUE = true;
     private static final boolean SRGB_ENCODE_COLORS = true;
@@ -190,7 +174,6 @@ class X3DAnariHandler extends AbstractHandler {
     private float lastAz = Float.NaN, lastEl = Float.NaN;
     private boolean built = false;
 
-    // Animation subsystem
     private long animStartTime = 0;
     private long frameCount = 0;
     private final List<X3DRoute> routes = new ArrayList<>();
@@ -199,7 +182,6 @@ class X3DAnariHandler extends AbstractHandler {
     private final Map<String, DisplacerAnim> displacers = new HashMap<>();
     private final List<DisplacerMeshBinding> activeBindings = new ArrayList<>();
 
-    // Mini proto & DEF engine
     private final Map<String, Object> defMap = new HashMap<>();
     private final Map<String, Object> protoMap = new HashMap<>();
     private final Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -221,7 +203,7 @@ class X3DAnariHandler extends AbstractHandler {
         super.updateScene(state);
         if (!built && device != null && world != null) {
             built = true;
-            System.out.println("--- Building Janari scene (world is ready) ---");
+            System.out.println("--- Building Janari scene ---");
             try {
                 build(device);
             } catch (Throwable t) {
@@ -243,7 +225,6 @@ class X3DAnariHandler extends AbstractHandler {
         float lastFrac = 0f;
         float lastWeight = 0f;
 
-        // 1. Tick active & enabled TimeSensors
         for (TimeSensorAnim ts : timeSensors) {
             if (!ts.enabled || !ts.isRunning) continue;
             if (!ts.loop && nowSec > ts.cycleInterval) {
@@ -253,14 +234,12 @@ class X3DAnariHandler extends AbstractHandler {
             float frac = (float) ((nowSec % ts.cycleInterval) / ts.cycleInterval);
             lastFrac = frac;
 
-            // 2. Propagate fraction through ROUTEs to ScalarInterpolators
             for (X3DRoute r : routes) {
                 if (r.fromNode.equals(ts.def) && r.fromField.equals("fraction_changed")) {
                     ScalarInterpolatorAnim si = interpolators.get(r.toNode);
                     if (si != null) {
                         float weight = si.evaluate(frac);
                         lastWeight = weight;
-                        // 3. Propagate weight to routed HAnimDisplacers
                         for (X3DRoute r2 : routes) {
                             if (r2.fromNode.equals(si.def) && r2.fromField.equals("value_changed")) {
                                 DisplacerAnim da = displacers.get(r2.toNode);
@@ -274,7 +253,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // 4. Update vertex buffers of bound meshes
         for (DisplacerMeshBinding binding : activeBindings) {
             float weight = binding.displacer.currentWeight;
             if (binding.lastWeight != weight) {
@@ -290,9 +268,8 @@ class X3DAnariHandler extends AbstractHandler {
             } catch (Throwable ignored) {}
         }
 
-        // Telemetry every 30 frames (~0.5 seconds at 60 FPS)
         if (frameCount % 30 == 0) {
-            System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | updated bindings=%d%n",
+            System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | bindings=%d%n",
                               nowSec, lastFrac, lastWeight, activeBindings.size());
         }
     }
@@ -330,11 +307,11 @@ class X3DAnariHandler extends AbstractHandler {
         defaultMaterial.commit();
         keepAlive.add(defaultMaterial);
 
-        System.out.println("Scanning scene tree for DEF/USE, Animation, and Protos...");
+        System.out.println("Scanning scene tree for DEFs, Protos, and Animation nodes...");
         buildCache(x3dModel);
         long tCache = System.currentTimeMillis() - t0;
         System.out.println("Cache built in " + tCache + " ms: found " + defMap.size()
-                           + " DEFs, " + displacers.size() + " Displacers, " + routes.size() + " ROUTEs.");
+                           + " DEFs, " + protoMap.size() + " Protos, " + displacers.size() + " Displacers, " + routes.size() + " ROUTEs.");
 
         float[] identity = { 1,0,0,0, 0,(FLIP_Y ? -1 : 1),0,0, 0,0,1,0, 0,0,0,1 };
         Object scene = null;
@@ -377,18 +354,25 @@ class X3DAnariHandler extends AbstractHandler {
         keepAlive.add(headlight);
 
         if (!anariInstances.isEmpty()) {
-            world.setInstance(device.newArray1D(anariInstances, DataType.INSTANCE));
+            Array1D instArray = device.newArray1D(anariInstances, DataType.INSTANCE);
+            instArray.commit();
+            world.setInstance(instArray);
+            keepAlive.add(instArray);
         }
-        world.setLight(device.newArray1D(List.of(headlight), DataType.LIGHT));
+        Array1D lightArray = device.newArray1D(List.of(headlight), DataType.LIGHT);
+        lightArray.commit();
+        world.setLight(lightArray);
+        keepAlive.add(lightArray);
+
         world.commit();
 
-        System.out.printf("Animation initialized: %d TimeSensors, %d Interpolators, %d Displacers, %d ROUTEs, %d Active Bindings%n",
+        System.out.printf("Animation initialized: %d TimeSensors, %d Interpolators, %d Displacers, %d ROUTEs, %d Bindings%n",
                           timeSensors.size(), interpolators.size(), displacers.size(), routes.size(), activeBindings.size());
-        System.out.println("--- Janari Load Complete: " + anariInstances.size() + " shapes in world ---");
+        System.out.println("--- Janari Load Complete: " + anariInstances.size() + " shape instances in world ---");
     }
 
     // ------------------------------------------------------------------
-    // Fast, targeted X3D hierarchy cache (captures animation nodes & DEFs)
+    // Fast, targeted X3D hierarchy cache
 
     private void buildCache(Object node) {
         if (node == null || !visited.add(node)) return;
@@ -405,7 +389,6 @@ class X3DAnariHandler extends AbstractHandler {
             if (name != null && !name.trim().isEmpty()) protoMap.put(name.trim(), node);
         }
 
-        // Parse TimeSensor with enabled check & autostart
         if (cName.contains("TimeSensor") && def != null) {
             boolean enabled = extractBoolean(node, "getEnabled", true);
             double interval = extractDouble(node, "getCycleInterval", 1.0);
@@ -416,7 +399,6 @@ class X3DAnariHandler extends AbstractHandler {
                               def, enabled, loop, interval);
         }
 
-        // Parse ScalarInterpolator
         if (cName.contains("ScalarInterpolator") && def != null) {
             float[] key = extractFloatArray(node, "getKey");
             float[] val = extractFloatArray(node, "getKeyValue");
@@ -425,7 +407,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // Parse HAnimDisplacer
         if (cName.contains("HAnimDisplacer") && def != null) {
             int[] ci = extractIntArray(node, "getCoordIndex");
             float[] d = extractFloatArray(node, "getDisplacements");
@@ -434,7 +415,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // Parse ROUTE
         if (cName.contains("ROUTE")) {
             String fNode = extractString(node, "getFromNode");
             String fField = extractString(node, "getFromField");
@@ -462,7 +442,9 @@ class X3DAnariHandler extends AbstractHandler {
         tryInvokeAndCache(node, "getCoord");
         tryInvokeAndCache(node, "getTexCoord");
         tryInvokeAndCache(node, "getProtoBody");
+        tryInvokeAndCache(node, "getProtoInterface");
         tryInvokeAndCache(node, "getProtoDeclareList");
+        tryInvokeAndCache(node, "getFieldList");
         tryInvokeAndCache(node, "getFieldValueList");
     }
 
@@ -539,6 +521,13 @@ class X3DAnariHandler extends AbstractHandler {
         } catch (Exception ignored) { return null; }
     }
 
+    private static String[] extractStringArray(Object node, String method) {
+        try {
+            Object res = node.getClass().getMethod(method).invoke(node);
+            return toStringArray(res);
+        } catch (Exception ignored) { return null; }
+    }
+
     private static float[] toFloatArray(Object o) {
         if (o == null) return null;
         if (o instanceof float[]) return (float[]) o;
@@ -563,6 +552,30 @@ class X3DAnariHandler extends AbstractHandler {
         return null;
     }
 
+    private static String[] toStringArray(Object o) {
+        if (o == null) return null;
+        if (o instanceof String[]) return (String[]) o;
+        if (o instanceof List<?>) {
+            List<?> l = (List<?>) o;
+            String[] arr = new String[l.size()];
+            for (int i = 0; i < l.size(); i++) arr[i] = l.get(i) != null ? l.get(i).toString() : "";
+            return arr;
+        }
+        for (String mName : List.of("getArray", "getValue", "getStrings")) {
+            try {
+                Object res = o.getClass().getMethod(mName).invoke(o);
+                if (res instanceof String[]) return (String[]) res;
+                if (res instanceof Object[]) {
+                    Object[] oa = (Object[]) res;
+                    String[] sa = new String[oa.length];
+                    for (int i = 0; i < oa.length; i++) sa[i] = String.valueOf(oa[i]);
+                    return sa;
+                }
+            } catch (Exception ignored) {}
+        }
+        return new String[]{ o.toString() };
+    }
+
     private void traverseList(Device device, Object children, float[] matrix, Map<String, Object> protoArgs) {
         if (children == null) return;
         if (children instanceof List<?>) {
@@ -577,7 +590,13 @@ class X3DAnariHandler extends AbstractHandler {
     private void processNode(Device device, Object node, float[] parentTransform, Map<String, Object> protoArgs) {
         if (node == null) return;
 
-        // USE
+        try {
+            String def = (String) node.getClass().getMethod("getDEF").invoke(node);
+            if (def != null && !def.trim().isEmpty()) {
+                defMap.putIfAbsent(def.trim(), node);
+            }
+        } catch (Exception ignored) {}
+
         try {
             String use = (String) node.getClass().getMethod("getUSE").invoke(node);
             if (use != null && !use.isEmpty() && defMap.containsKey(use)) {
@@ -621,30 +640,73 @@ class X3DAnariHandler extends AbstractHandler {
             return;
         }
 
+        // --- ProtoInstance Execution ---
         if (cName.contains("ProtoInstance")) {
             try {
-                String name = (String) node.getClass().getMethod("getName").invoke(node);
+                String name = extractString(node, "getName");
                 Object protoDecl = protoMap.get(name);
                 if (protoDecl != null) {
-                    Map<String, Object> newArgs = new HashMap<>(protoArgs);
-                    List<?> fvList = (List<?>) node.getClass().getMethod("getFieldValueList").invoke(node);
-                    for (Object fv : fvList) {
-                        String fName = (String) fv.getClass().getMethod("getName").invoke(fv);
-                        Object fVal = fv.getClass().getMethod("getValue").invoke(fv);
-                        if (fVal == null || fVal.toString().trim().isEmpty()) {
-                            fVal = fv.getClass().getMethod("getChildren").invoke(fv);
-                        }
-                        newArgs.put(fName, fVal);
+                    Map<String, Object> newArgs = new HashMap<>();
+
+                    // 1. Defaults from ProtoInterface
+                    Object protoInterface = null;
+                    try { protoInterface = protoDecl.getClass().getMethod("getProtoInterface").invoke(protoDecl); } catch (Exception ignored) {}
+                    if (protoInterface != null) {
+                        try {
+                            List<?> fList = (List<?>) protoInterface.getClass().getMethod("getFieldList").invoke(protoInterface);
+                            for (Object f : fList) {
+                                String fName = extractString(f, "getName");
+                                Object fVal = extractString(f, "getValue");
+                                if (fVal == null || fVal.toString().trim().isEmpty()) {
+                                    try { fVal = f.getClass().getMethod("getChildren").invoke(f); } catch (Exception ignored) {}
+                                }
+                                if (fVal != null) newArgs.put(fName, fVal);
+                            }
+                        } catch (Exception ignored) {}
                     }
+
+                    // 2. IS connects from parent proto scope
+                    Object isNode = null;
+                    try { isNode = node.getClass().getMethod("getIS").invoke(node); } catch (Exception ignored) {}
+                    if (isNode != null) {
+                        try {
+                            List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                            for (Object c : connects) {
+                                String nField = extractString(c, "getNodeField");
+                                String pField = extractString(c, "getProtoField");
+                                if (protoArgs.containsKey(pField)) {
+                                    newArgs.put(nField, protoArgs.get(pField));
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    // 3. Overrides from fieldValueList on this ProtoInstance
+                    try {
+                        List<?> fvList = (List<?>) node.getClass().getMethod("getFieldValueList").invoke(node);
+                        for (Object fv : fvList) {
+                            String fName = extractString(fv, "getName");
+                            Object fVal = extractString(fv, "getValue");
+                            if (fVal == null || fVal.toString().trim().isEmpty()) {
+                                try { fVal = fv.getClass().getMethod("getChildren").invoke(fv); } catch (Exception ignored) {}
+                            }
+                            if (fVal != null) newArgs.put(fName, fVal);
+                        }
+                    } catch (Exception ignored) {}
+
+                    // 4. Instantiate ProtoBody
                     Object pBody = protoDecl.getClass().getMethod("getProtoBody").invoke(protoDecl);
-                    traverseList(device, pBody.getClass().getMethod("getChildren").invoke(pBody),
-                                 parentTransform, newArgs);
+                    Object bodyChildren = pBody.getClass().getMethod("getChildren").invoke(pBody);
+                    traverseList(device, bodyChildren, parentTransform, newArgs);
+                } else {
+                    System.err.println("Unrecognized ProtoDeclare: " + name);
                 }
-            } catch (Exception e) { e.printStackTrace(); }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
             return;
         }
 
-        // HAnimHumanoid contains skeleton joints
         if (cName.contains("HAnimHumanoid")) {
             try {
                 Object skel = null;
@@ -656,7 +718,6 @@ class X3DAnariHandler extends AbstractHandler {
             } catch (Exception ignored) {}
         }
 
-        // HAnimSegment may bind Displacers to child IFS meshes
         if (cName.contains("HAnimSegment")) {
             List<DisplacerAnim> segDisplacers = new ArrayList<>();
             for (String mName : List.of("getDisplacers", "getDisplacerList")) {
@@ -680,37 +741,38 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        // --- Transform Handling ---
         if (cName.contains("Transform") || cName.contains("HAnimJoint")) {
-            float[] localMat = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+            float[] tr = null;
+            float[] sc = null;
+            float[] rot = null;
             Object childrenToTraverse = null;
-            try {
-                float[] tr = null;
-                try { tr = (float[]) node.getClass().getMethod("getTranslation").invoke(node); } catch (Exception ignored) {}
 
-                try {
-                    Object isNode = node.getClass().getMethod("getIS").invoke(node);
-                    if (isNode != null) {
-                        List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
-                        for (Object c : connects) {
-                            String nField = (String) c.getClass().getMethod("getNodeField").invoke(c);
-                            String pField = (String) c.getClass().getMethod("getProtoField").invoke(c);
-                            if (nField.equals("translation") && protoArgs.containsKey(pField)) {
-                                tr = parseVec3(protoArgs.get(pField));
-                            } else if (nField.equals("children") && protoArgs.containsKey(pField)) {
-                                childrenToTraverse = protoArgs.get(pField);
-                            }
+            try { tr = extractFloatArray(node, "getTranslation"); } catch (Exception ignored) {}
+            try { sc = extractFloatArray(node, "getScale"); } catch (Exception ignored) {}
+            try { rot = extractFloatArray(node, "getRotation"); } catch (Exception ignored) {}
+
+            try {
+                Object isNode = node.getClass().getMethod("getIS").invoke(node);
+                if (isNode != null) {
+                    List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                    for (Object c : connects) {
+                        String nField = extractString(c, "getNodeField");
+                        String pField = extractString(c, "getProtoField");
+                        if (protoArgs.containsKey(pField)) {
+                            Object val = protoArgs.get(pField);
+                            if ("translation".equals(nField)) tr = parseVec3(val);
+                            else if ("scale".equals(nField)) sc = parseVec3(val);
+                            else if ("rotation".equals(nField)) rot = parseVec4(val);
+                            else if ("children".equals(nField)) childrenToTraverse = val;
                         }
                     }
-                } catch (Exception ignored) {}
-
-                if (tr != null && tr.length >= 3) {
-                    localMat[12] = tr[0];
-                    localMat[13] = tr[1];
-                    localMat[14] = tr[2];
                 }
             } catch (Exception ignored) {}
 
+            float[] localMat = buildTransformMatrix(tr, sc, rot);
             float[] currentMat = multiplyMatrix(parentTransform, localMat);
+
             try {
                 if (childrenToTraverse == null) {
                     childrenToTraverse = node.getClass().getMethod("getChildren").invoke(node);
@@ -750,7 +812,65 @@ class X3DAnariHandler extends AbstractHandler {
         return null;
     }
 
+    private static float[] parseVec4(Object val) {
+        if (val == null) return null;
+        if (val instanceof float[]) return (float[]) val;
+        if (val instanceof String) {
+            String[] p = ((String) val).trim().split("[,\\s]+");
+            if (p.length >= 4) {
+                try { return new float[]{ Float.parseFloat(p[0]), Float.parseFloat(p[1]), Float.parseFloat(p[2]), Float.parseFloat(p[3]) }; }
+                catch (Exception ignored) {}
+            }
+        }
+        try {
+            Object v = val.getClass().getMethod("getValue").invoke(val);
+            if (v instanceof float[]) return (float[]) v;
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static float[] buildTransformMatrix(float[] tr, float[] sc, float[] rot) {
+        float sx = (sc != null && sc.length >= 3) ? sc[0] : 1f;
+        float sy = (sc != null && sc.length >= 3) ? sc[1] : 1f;
+        float sz = (sc != null && sc.length >= 3) ? sc[2] : 1f;
+
+        float[] m = {
+            sx, 0,  0,  0,
+            0,  sy, 0,  0,
+            0,  0,  sz, 0,
+            0,  0,  0,  1
+        };
+
+        if (rot != null && rot.length >= 4 && Math.abs(rot[3]) > 1e-6f) {
+            float ax = rot[0], ay = rot[1], az = rot[2], angle = rot[3];
+            float len = (float) Math.sqrt(ax * ax + ay * ay + az * az);
+            if (len > 1e-6f) {
+                ax /= len; ay /= len; az /= len;
+                float c = (float) Math.cos(angle), s = (float) Math.sin(angle);
+                float t = 1f - c;
+                float[] r = {
+                    t*ax*ax + c,     t*ax*ay + s*az, t*ax*az - s*ay, 0,
+                    t*ax*ay - s*az, t*ay*ay + c,     t*ay*az + s*ax, 0,
+                    t*ax*az + s*ay, t*ay*az - s*ax, t*az*az + c,     0,
+                    0,               0,               0,              1
+                };
+                m = multiplyMatrixStatic(r, m);
+            }
+        }
+
+        if (tr != null && tr.length >= 3) {
+            m[12] += tr[0];
+            m[13] += tr[1];
+            m[14] += tr[2];
+        }
+        return m;
+    }
+
     private float[] multiplyMatrix(float[] parent, float[] local) {
+        return multiplyMatrixStatic(parent, local);
+    }
+
+    private static float[] multiplyMatrixStatic(float[] parent, float[] local) {
         float[] r = new float[16];
         for (int c = 0; c < 4; c++)
             for (int row = 0; row < 4; row++)
@@ -762,7 +882,7 @@ class X3DAnariHandler extends AbstractHandler {
     }
 
     // ------------------------------------------------------------------
-    // ANARI object construction & helper to set ANARI object parameters
+    // ANARI Object Parameter Helper
 
     private MemorySegment getAnariHandle(Object anariObj) {
         if (anariObj == null) return null;
@@ -789,29 +909,79 @@ class X3DAnariHandler extends AbstractHandler {
                                          String paramName,
                                          DataType type,
                                          Object anariObj) {
+        if (target == null || anariObj == null) return;
+
+        // 1. Try public typed method
+        for (Method m : target.getClass().getMethods()) {
+            if (m.getParameterCount() == 1) {
+                String mName = m.getName().toLowerCase();
+                String cleanParam = paramName.replace(".", "").replace("_", "").toLowerCase();
+                if (mName.endsWith(cleanParam) || mName.equals("set" + cleanParam)) {
+                    Class<?> pt = m.getParameterTypes()[0];
+                    if (pt.isInstance(anariObj)) {
+                        try {
+                            m.invoke(target, anariObj);
+                            return;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        }
+
+        // 2. Try generic set(String, Object)
+        for (Method m : target.getClass().getMethods()) {
+            if (m.getName().equals("set") && m.getParameterCount() == 2) {
+                if (m.getParameterTypes()[0] == String.class && m.getParameterTypes()[1].isInstance(anariObj)) {
+                    try {
+                        m.invoke(target, paramName, anariObj);
+                        return;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        // 3. Try low-level set(String, DataType, MemorySegment)
         MemorySegment h = getAnariHandle(anariObj);
         if (h != null) {
             MemorySegment ptr = sceneArena.allocateFrom(ValueLayout.ADDRESS, h);
             try {
                 target.set(paramName, type, ptr);
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
-        } else {
-            System.err.println("Could not extract native handle from " + anariObj);
+                return;
+            } catch (Throwable ignored) {}
+            try {
+                target.set(paramName, type, h);
+            } catch (Throwable ignored) {}
         }
     }
 
     private Instance buildShapeInstance(Device device, Object shape, float[] transformMatrix, Map<String, Object> protoArgs) throws Throwable {
-        Object x3dGeom = shape.getClass().getMethod("getGeometry").invoke(shape);
+        Object x3dGeom = null;
+        try { x3dGeom = shape.getClass().getMethod("getGeometry").invoke(shape); } catch (Exception ignored) {}
+
+        try {
+            Object isNode = shape.getClass().getMethod("getIS").invoke(shape);
+            if (isNode != null) {
+                List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                for (Object c : connects) {
+                    String nField = extractString(c, "getNodeField");
+                    String pField = extractString(c, "getProtoField");
+                    if ("geometry".equals(nField) && protoArgs.containsKey(pField)) {
+                        x3dGeom = protoArgs.get(pField);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
         x3dGeom = resolveUse(x3dGeom);
         Geometry.Triangle geometry = createGeometry(device, x3dGeom, transformMatrix, protoArgs);
         if (geometry == null) return null;
 
         Material<?> material = defaultMaterial;
         try {
-            Object app = shape.getClass().getMethod("getAppearance").invoke(shape);
+            Object app = null;
+            try { app = shape.getClass().getMethod("getAppearance").invoke(shape); } catch (Exception ignored) {}
             app = resolveUse(app);
+
             Object mat = (app == null) ? null : app.getClass().getMethod("getMaterial").invoke(app);
             mat = resolveUse(mat);
             Object tex = (app == null) ? null : app.getClass().getMethod("getTexture").invoke(app);
@@ -824,9 +994,11 @@ class X3DAnariHandler extends AbstractHandler {
 
             if (mat != null || sampler != null) {
                 float[] d = null;
+                float transparency = 0f;
+
                 if (mat != null) {
-                    try { d = (float[]) mat.getClass().getMethod("getDiffuseColor").invoke(mat); }
-                    catch (Exception ignored) {}
+                    try { d = (float[]) mat.getClass().getMethod("getDiffuseColor").invoke(mat); } catch (Exception ignored) {}
+                    try { transparency = (float) extractDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
 
                     if (d == null && mat.getClass().getSimpleName().contains("ProtoInstance")) {
                         try {
@@ -844,28 +1016,21 @@ class X3DAnariHandler extends AbstractHandler {
 
                 if (d == null) d = new float[]{ 1f, 1f, 1f };
                 float[] c = displayColor(d[0], d[1], d[2]);
+                float opacity = Math.max(0f, Math.min(1f, 1f - transparency));
 
                 Material.Matte m = device.newMaterial(Material.SubType.MATTE);
                 if (sampler != null) {
-                    boolean colSet = false;
-                    for (Method mtd : m.getClass().getMethods()) {
-                        if (mtd.getName().toLowerCase().contains("color") && mtd.getParameterCount() == 1) {
-                            Class<?> pt = mtd.getParameterTypes()[0];
-                            if (pt.isAssignableFrom(sampler.getClass()) || pt == Sampler.class) {
-                                try {
-                                    mtd.invoke(m, sampler);
-                                    colSet = true;
-                                    break;
-                                } catch (Throwable ignored) {}
-                            }
-                        }
-                    }
-                    if (!colSet) {
-                        setAnariObjectParameter(m, "color", DataType.SAMPLER, sampler);
-                    }
+                    setAnariObjectParameter(m, "color", DataType.SAMPLER, sampler);
                 } else {
                     m.setColor(c[0], c[1], c[2]);
                 }
+
+                if (opacity < 0.999f) {
+                    try {
+                        m.setFloat32("opacity", opacity);
+                    } catch (Throwable ignored) {}
+                }
+
                 m.commit();
                 keepAlive.add(m);
                 material = m;
@@ -877,8 +1042,11 @@ class X3DAnariHandler extends AbstractHandler {
         keepAlive.add(surface);
 
         Group group = device.newGroup();
-        group.setSurface(device.newArray1D(List.of(surface), DataType.SURFACE));
+        Array1D surfArray = device.newArray1D(List.of(surface), DataType.SURFACE);
+        surfArray.commit();
+        group.setSurface(surfArray);
         group.commit();
+        keepAlive.add(surfArray);
         keepAlive.add(group);
 
         Instance instance = device.newInstance(Instance.SubType.TRANSFORM);
@@ -890,41 +1058,67 @@ class X3DAnariHandler extends AbstractHandler {
 
     private Sampler getOrCreateTextureSampler(Device device, Object imageTexture) {
         try {
-            String[] urls = (String[]) imageTexture.getClass().getMethod("getUrl").invoke(imageTexture);
+            String[] urls = extractStringArray(imageTexture, "getUrl");
             if (urls == null || urls.length == 0) return null;
             String firstUrl = urls[0];
             if (textureCache.containsKey(firstUrl)) return textureCache.get(firstUrl);
 
             BufferedImage img = null;
             for (String u : urls) {
-                try {
-                    File f = new File(u);
+                if (u == null || u.trim().isEmpty()) continue;
+                u = u.trim().replace("\"", "");
+
+                List<File> candidates = List.of(
+                    new File(u),
+                    new File("data", u),
+                    new File("../data", u),
+                    new File("../../data", u),
+                    new File("src/main/resources", u),
+                    new File(new File(u).getName()),
+                    new File("data", new File(u).getName()),
+                    new File("../data", new File(u).getName())
+                );
+                for (File f : candidates) {
                     if (f.exists() && f.isFile()) {
-                        img = ImageIO.read(f);
-                        if (img != null) break;
+                        try {
+                            img = ImageIO.read(f);
+                            if (img != null) {
+                                System.out.println("Loaded texture file: " + f.getAbsolutePath());
+                                break;
+                            }
+                        } catch (Exception ignored) {}
                     }
-                    File alt = new File("../data", u);
-                    if (alt.exists() && alt.isFile()) {
-                        img = ImageIO.read(alt);
-                        if (img != null) break;
-                    }
-                    if (u.startsWith("http://") || u.startsWith("https://")) {
-                        try (InputStream is = URI.create(u).toURL().openStream()) {
+                }
+                if (img != null) break;
+
+                if (u.startsWith("http://") || u.startsWith("https://")) {
+                    try {
+                        java.net.URLConnection conn = URI.create(u).toURL().openConnection();
+                        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                        conn.setConnectTimeout(8000);
+                        conn.setReadTimeout(8000);
+                        try (InputStream is = conn.getInputStream()) {
                             img = ImageIO.read(is);
-                            if (img != null) break;
+                            if (img != null) {
+                                System.out.println("Downloaded texture: " + u);
+                                break;
+                            }
                         }
+                    } catch (Exception e) {
+                        System.err.println("Could not load remote texture from " + u + ": " + e.getMessage());
                     }
-                } catch (Exception ignored) {}
+                }
             }
 
             if (img == null) {
-                System.out.println("ImageTexture: could not load image for: " + firstUrl);
+                System.out.println("ImageTexture: could not resolve image file for: " + firstUrl);
                 return null;
             }
 
             int width = img.getWidth(), height = img.getHeight();
             byte[] rgba = new byte[width * height * 4];
             int k = 0;
+            // Rows read bottom-to-top so (u, v)=(0, 0) starts at the bottom-left matching X3D
             for (int y = height - 1; y >= 0; y--) {
                 for (int x = 0; x < width; x++) {
                     int argb = img.getRGB(x, y);
@@ -932,10 +1126,16 @@ class X3DAnariHandler extends AbstractHandler {
                     byte g = (byte) ((argb >> 8)  & 0xFF);
                     byte b = (byte) (argb         & 0xFF);
                     byte a = (byte) ((argb >> 24) & 0xFF);
+
+                    // Pre-swap Red and Blue so AnariPane's frame display outputs correct colors
                     if (SWAP_RED_BLUE) {
-                        rgba[k++] = b; rgba[k++] = g; rgba[k++] = r;
+                        rgba[k++] = b;
+                        rgba[k++] = g;
+                        rgba[k++] = r;
                     } else {
-                        rgba[k++] = r; rgba[k++] = g; rgba[k++] = b;
+                        rgba[k++] = r;
+                        rgba[k++] = g;
+                        rgba[k++] = b;
                     }
                     rgba[k++] = a;
                 }
@@ -944,6 +1144,7 @@ class X3DAnariHandler extends AbstractHandler {
             MemorySegment imgSeg = sceneArena.allocateFrom(ValueLayout.JAVA_BYTE, rgba);
             Array2D imgArray = device.newArray2D(imgSeg, MemorySegment.NULL, MemorySegment.NULL,
                                                 DataType.UFIXED8_VEC4, width, height);
+            imgArray.commit();
             keepAlive.add(imgArray);
 
             Sampler sampler = null;
@@ -957,15 +1158,7 @@ class X3DAnariHandler extends AbstractHandler {
             }
 
             if (sampler != null) {
-                boolean imgSet = false;
-                try {
-                    Method mImg = sampler.getClass().getMethod("setImage", Array2D.class);
-                    mImg.invoke(sampler, imgArray);
-                    imgSet = true;
-                } catch (Throwable ignored) {}
-                if (!imgSet) {
-                    setAnariObjectParameter(sampler, "image", DataType.ARRAY2D, imgArray);
-                }
+                setAnariObjectParameter(sampler, "image", DataType.ARRAY2D, imgArray);
 
                 boolean inAttrSet = false;
                 try {
@@ -975,16 +1168,23 @@ class X3DAnariHandler extends AbstractHandler {
                 } catch (Throwable ignored) {}
                 if (!inAttrSet) {
                     try {
-                        sampler.set("inAttribute", DataType.STRING, sceneArena.allocateFrom("attribute0"));
-                    } catch (Throwable t) {
-                        t.printStackTrace();
-                    }
+                        sampler.set("inAttribute", DataType.STRING, sceneArena.allocateFrom("attribute0\0", StandardCharsets.UTF_8));
+                    } catch (Throwable ignored) {}
                 }
+
+                try {
+                    Method mWrap1 = sampler.getClass().getMethod("setWrap1", String.class);
+                    mWrap1.invoke(sampler, "repeat");
+                } catch (Throwable ignored) {}
+                try {
+                    Method mWrap2 = sampler.getClass().getMethod("setWrap2", String.class);
+                    mWrap2.invoke(sampler, "repeat");
+                } catch (Throwable ignored) {}
 
                 sampler.commit();
                 keepAlive.add(sampler);
                 textureCache.put(firstUrl, sampler);
-                System.out.println("ImageTexture loaded (" + width + "x" + height + "): " + firstUrl);
+                System.out.println("ImageTexture successfully initialized (" + width + "x" + height + "): " + firstUrl);
                 return sampler;
             }
         } catch (Throwable e) {
@@ -1017,9 +1217,11 @@ class X3DAnariHandler extends AbstractHandler {
         switch (g) {
             case "Box":            return createBox(device, x3dGeom, m);
             case "Sphere":         return createSphere(device, x3dGeom, m);
+            case "Cylinder":       return createCylinder(device, x3dGeom, m);
+            case "Extrusion":      return createExtrusion(device, x3dGeom, m);
             case "IndexedFaceSet": return createIndexedFaceSet(device, x3dGeom, m, protoArgs);
             default:
-                System.out.println("Unsupported geometry: " + g);
+                System.out.println("Unsupported geometry type: " + g);
                 return null;
         }
     }
@@ -1038,9 +1240,7 @@ class X3DAnariHandler extends AbstractHandler {
 
     private Geometry.Triangle createSphere(Device device, Object sphere, float[] m) throws Throwable {
         float radius = 1.0f;
-        try {
-            radius = (float) sphere.getClass().getMethod("getRadius").invoke(sphere);
-        } catch (Exception ignored) {}
+        try { radius = (float) sphere.getClass().getMethod("getRadius").invoke(sphere); } catch (Exception ignored) {}
 
         int rings = 20;
         int sectors = 32;
@@ -1087,9 +1287,11 @@ class X3DAnariHandler extends AbstractHandler {
         MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
         Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.FLOAT32_VEC3, nverts);
+        vArray.commit();
         MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
         Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.UINT32_VEC3, ntris);
+        iArray.commit();
 
         Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
                 .setVertexPosition(vArray)
@@ -1099,6 +1301,288 @@ class X3DAnariHandler extends AbstractHandler {
         keepAlive.add(iArray);
         keepAlive.add(geom);
         return geom;
+    }
+
+    private Geometry.Triangle createCylinder(Device device, Object cyl, float[] m) throws Throwable {
+        float radius = (float) extractDouble(cyl, "getRadius", 1.0);
+        float height = (float) extractDouble(cyl, "getHeight", 2.0);
+        boolean top = extractBoolean(cyl, "getTop", true);
+        boolean bottom = extractBoolean(cyl, "getBottom", true);
+        boolean side = extractBoolean(cyl, "getSide", true);
+
+        int slices = 32;
+        float halfH = height / 2.0f;
+        List<Float> vList = new ArrayList<>();
+        List<Integer> iList = new ArrayList<>();
+
+        if (side) {
+            int baseIdx = vList.size() / 3;
+            for (int i = 0; i <= slices; i++) {
+                double theta = (double) i / slices * 2.0 * Math.PI;
+                float x = (float) (radius * Math.cos(theta));
+                float z = (float) (radius * Math.sin(theta));
+                vList.add(x); vList.add(-halfH); vList.add(z);
+                vList.add(x); vList.add(halfH);  vList.add(z);
+            }
+            for (int i = 0; i < slices; i++) {
+                int i0 = baseIdx + i * 2;
+                int i1 = baseIdx + i * 2 + 1;
+                int i2 = baseIdx + (i + 1) * 2 + 1;
+                int i3 = baseIdx + (i + 1) * 2;
+                iList.add(i0); iList.add(i2); iList.add(i1);
+                iList.add(i0); iList.add(i3); iList.add(i2);
+            }
+        }
+
+        if (top) {
+            int centerIdx = vList.size() / 3;
+            vList.add(0f); vList.add(halfH); vList.add(0f);
+            int rimStart = vList.size() / 3;
+            for (int i = 0; i <= slices; i++) {
+                double theta = (double) i / slices * 2.0 * Math.PI;
+                vList.add((float) (radius * Math.cos(theta)));
+                vList.add(halfH);
+                vList.add((float) (radius * Math.sin(theta)));
+            }
+            for (int i = 0; i < slices; i++) {
+                iList.add(centerIdx);
+                iList.add(rimStart + i + 1);
+                iList.add(rimStart + i);
+            }
+        }
+
+        if (bottom) {
+            int centerIdx = vList.size() / 3;
+            vList.add(0f); vList.add(-halfH); vList.add(0f);
+            int rimStart = vList.size() / 3;
+            for (int i = 0; i <= slices; i++) {
+                double theta = (double) i / slices * 2.0 * Math.PI;
+                vList.add((float) (radius * Math.cos(theta)));
+                vList.add(-halfH);
+                vList.add((float) (radius * Math.sin(theta)));
+            }
+            for (int i = 0; i < slices; i++) {
+                iList.add(centerIdx);
+                iList.add(rimStart + i);
+                iList.add(rimStart + i + 1);
+            }
+        }
+
+        if (iList.isEmpty()) return null;
+
+        float[] vertices = new float[vList.size()];
+        for (int i = 0; i < vList.size(); i++) vertices[i] = vList.get(i);
+        int[] indices = new int[iList.size()];
+        for (int i = 0; i < iList.size(); i++) indices[i] = iList.get(i);
+
+        addBounds(vertices, m);
+
+        MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
+        Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.FLOAT32_VEC3, vertices.length / 3);
+        vArray.commit();
+        MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.UINT32_VEC3, indices.length / 3);
+        iArray.commit();
+
+        Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+        geom.commit();
+        keepAlive.add(vArray);
+        keepAlive.add(iArray);
+        keepAlive.add(geom);
+        return geom;
+    }
+
+    private Geometry.Triangle createExtrusion(Device device, Object extrusion, float[] m) throws Throwable {
+        float[] rawCS = extractFloatArray(extrusion, "getCrossSection");
+        if (rawCS == null || rawCS.length < 4) {
+            rawCS = new float[]{ 1f, 1f,  1f, -1f,  -1f, -1f,  -1f, 1f,  1f, 1f };
+        }
+        int numCsPts = rawCS.length / 2;
+
+        float[] rawSpine = extractFloatArray(extrusion, "getSpine");
+        if (rawSpine == null || rawSpine.length < 6) {
+            rawSpine = new float[]{ 0f, 0f, 0f,  0f, 1f, 0f };
+        }
+        int numSpinePts = rawSpine.length / 3;
+
+        float[] rawScale = extractFloatArray(extrusion, "getScale");
+        boolean beginCap = extractBoolean(extrusion, "getBeginCap", true);
+        boolean endCap = extractBoolean(extrusion, "getEndCap", true);
+
+        boolean spineClosed = numSpinePts > 2
+                && Math.abs(rawSpine[0] - rawSpine[(numSpinePts - 1) * 3]) < 1e-5f
+                && Math.abs(rawSpine[1] - rawSpine[(numSpinePts - 1) * 3 + 1]) < 1e-5f
+                && Math.abs(rawSpine[2] - rawSpine[(numSpinePts - 1) * 3 + 2]) < 1e-5f;
+
+        float[][] scpX = new float[numSpinePts][3];
+        float[][] scpY = new float[numSpinePts][3];
+        float[][] scpZ = new float[numSpinePts][3];
+
+        for (int i = 0; i < numSpinePts; i++) {
+            float[] d = new float[3];
+            if (spineClosed) {
+                int prev = (i - 1 + numSpinePts - 1) % (numSpinePts - 1);
+                int next = (i + 1) % (numSpinePts - 1);
+                d[0] = rawSpine[next * 3]     - rawSpine[prev * 3];
+                d[1] = rawSpine[next * 3 + 1] - rawSpine[prev * 3 + 1];
+                d[2] = rawSpine[next * 3 + 2] - rawSpine[prev * 3 + 2];
+            } else {
+                if (i == 0) {
+                    d[0] = rawSpine[3]     - rawSpine[0];
+                    d[1] = rawSpine[4]     - rawSpine[1];
+                    d[2] = rawSpine[5]     - rawSpine[2];
+                } else if (i == numSpinePts - 1) {
+                    d[0] = rawSpine[i * 3]     - rawSpine[(i - 1) * 3];
+                    d[1] = rawSpine[i * 3 + 1] - rawSpine[(i - 1) * 3 + 1];
+                    d[2] = rawSpine[i * 3 + 2] - rawSpine[(i - 1) * 3 + 2];
+                } else {
+                    d[0] = rawSpine[(i + 1) * 3]     - rawSpine[(i - 1) * 3];
+                    d[1] = rawSpine[(i + 1) * 3 + 1] - rawSpine[(i - 1) * 3 + 1];
+                    d[2] = rawSpine[(i + 1) * 3 + 2] - rawSpine[(i - 1) * 3 + 2];
+                }
+            }
+            normalize(d);
+            scpY[i] = d;
+        }
+
+        for (int i = 0; i < numSpinePts; i++) {
+            float[] y = scpY[i];
+            float[] z = new float[3];
+
+            if (Math.abs(y[0]) < 1e-4f && Math.abs(y[2]) < 1e-4f) {
+                z[0] = 0f;
+                z[1] = 0f;
+                z[2] = (y[1] > 0) ? -1f : 1f;
+            } else {
+                z[0] = -y[2];
+                z[1] = 0f;
+                z[2] = y[0];
+                normalize(z);
+            }
+            scpZ[i] = z;
+            cross(y, z, scpX[i]);
+            normalize(scpX[i]);
+        }
+
+        int totalRingVerts = numSpinePts * numCsPts;
+        float[] vertices = new float[totalRingVerts * 3];
+        int vIdx = 0;
+
+        for (int s = 0; s < numSpinePts; s++) {
+            float sx = 1f, sz = 1f;
+            if (rawScale != null) {
+                if (s * 2 + 1 < rawScale.length) {
+                    sx = rawScale[s * 2];
+                    sz = rawScale[s * 2 + 1];
+                } else if (rawScale.length >= 2) {
+                    sx = rawScale[rawScale.length - 2];
+                    sz = rawScale[rawScale.length - 1];
+                }
+            }
+
+            float spX = rawSpine[s * 3];
+            float spY = rawSpine[s * 3 + 1];
+            float spZ = rawSpine[s * 3 + 2];
+
+            for (int c = 0; c < numCsPts; c++) {
+                float cx = rawCS[c * 2] * sx;
+                float cz = rawCS[c * 2 + 1] * sz;
+
+                vertices[vIdx++] = spX + cx * scpX[s][0] + cz * scpZ[s][0];
+                vertices[vIdx++] = spY + cx * scpX[s][1] + cz * scpZ[s][1];
+                vertices[vIdx++] = spZ + cx * scpX[s][2] + cz * scpZ[s][2];
+            }
+        }
+
+        List<Integer> indexList = new ArrayList<>();
+        int spineSegments = numSpinePts - 1;
+
+        for (int s = 0; s < spineSegments; s++) {
+            int nextS = (s + 1) % numSpinePts;
+            for (int c = 0; c < numCsPts - 1; c++) {
+                int i0 = s * numCsPts + c;
+                int i1 = nextS * numCsPts + c;
+                int i2 = nextS * numCsPts + (c + 1);
+                int i3 = s * numCsPts + (c + 1);
+
+                indexList.add(i0);
+                indexList.add(i1);
+                indexList.add(i2);
+
+                indexList.add(i0);
+                indexList.add(i2);
+                indexList.add(i3);
+            }
+        }
+
+        boolean csClosed = numCsPts > 2
+                && Math.abs(rawCS[0] - rawCS[(numCsPts - 1) * 2]) < 1e-4f
+                && Math.abs(rawCS[1] - rawCS[(numCsPts - 1) * 2 + 1]) < 1e-4f;
+
+        if (!spineClosed && csClosed) {
+            int capPts = numCsPts - 1;
+            if (beginCap) {
+                for (int i = 1; i < capPts - 1; i++) {
+                    indexList.add(0);
+                    indexList.add(i + 1);
+                    indexList.add(i);
+                }
+            }
+            if (endCap) {
+                int base = (numSpinePts - 1) * numCsPts;
+                for (int i = 1; i < capPts - 1; i++) {
+                    indexList.add(base);
+                    indexList.add(base + i);
+                    indexList.add(base + i + 1);
+                }
+            }
+        }
+
+        int[] indices = new int[indexList.size()];
+        for (int i = 0; i < indices.length; i++) indices[i] = indexList.get(i);
+
+        addBounds(vertices, m);
+
+        MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
+        Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.FLOAT32_VEC3, totalRingVerts);
+        vArray.commit();
+        MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.UINT32_VEC3, indices.length / 3);
+        iArray.commit();
+
+        Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+        geom.commit();
+        keepAlive.add(vArray);
+        keepAlive.add(iArray);
+        keepAlive.add(geom);
+        return geom;
+    }
+
+    private static void cross(float[] a, float[] b, float[] out) {
+        out[0] = a[1] * b[2] - a[2] * b[1];
+        out[1] = a[2] * b[0] - a[0] * b[2];
+        out[2] = a[0] * b[1] - a[1] * b[0];
+    }
+
+    private static float norm(float[] v) {
+        return (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    }
+
+    private static void normalize(float[] v) {
+        float len = norm(v);
+        if (len > 1e-6f) {
+            v[0] /= len;
+            v[1] /= len;
+            v[2] /= len;
+        }
     }
 
     private Geometry.Triangle createIndexedFaceSet(Device device, Object ifs, float[] m, Map<String, Object> protoArgs) throws Throwable {
@@ -1164,7 +1648,8 @@ class X3DAnariHandler extends AbstractHandler {
                         unrolledUV[uvK++] = uvs[2 * uvIdx];
                         unrolledUV[uvK++] = uvs[2 * uvIdx + 1];
                     } else {
-                        unrolledUV[uvK++] = 0f; unrolledUV[uvK++] = 0f;
+                        unrolledUV[uvK++] = 0f;
+                        unrolledUV[uvK++] = 0f;
                     }
                 }
                 indices[vertIdx] = vertIdx;
@@ -1174,9 +1659,11 @@ class X3DAnariHandler extends AbstractHandler {
         MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledPts);
         Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.FLOAT32_VEC3, totalVerts);
+        vArray.commit();
         MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
         Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.UINT32_VEC3, totalTris);
+        iArray.commit();
 
         Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
                 .setVertexPosition(vArray)
@@ -1186,15 +1673,8 @@ class X3DAnariHandler extends AbstractHandler {
             MemorySegment uvSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledUV);
             Array1D uvArray = device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL,
                                                 DataType.FLOAT32_VEC2, totalVerts);
-            boolean uvSet = false;
-            try {
-                Method mUv = geom.getClass().getMethod("setVertexAttribute0", Array1D.class);
-                mUv.invoke(geom, uvArray);
-                uvSet = true;
-            } catch (Throwable ignored) {}
-            if (!uvSet) {
-                setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, uvArray);
-            }
+            uvArray.commit();
+            setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, uvArray);
             keepAlive.add(uvArray);
         }
 
@@ -1204,7 +1684,6 @@ class X3DAnariHandler extends AbstractHandler {
         keepAlive.add(geom);
         addBounds(unrolledPts, m);
 
-        // Bind HAnimDisplacer if present in the segment hierarchy
         Object activeDispObj = protoArgs.get("_activeDisplacers");
         if (activeDispObj instanceof List<?>) {
             List<?> dList = (List<?>) activeDispObj;
@@ -1325,9 +1804,11 @@ class X3DAnariHandler extends AbstractHandler {
         MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, vertices);
         Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.FLOAT32_VEC3, vertices.length / 3);
+        vArray.commit();
         MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
         Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.UINT32_VEC3, indices.length / 3);
+        iArray.commit();
 
         Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
                 .setVertexPosition(vArray)
@@ -1361,7 +1842,7 @@ class X3DAnariHandler extends AbstractHandler {
             this.cycleInterval = cycleInterval > 0 ? cycleInterval : 1.0;
             this.loop = loop;
             this.enabled = enabled;
-            this.isRunning = enabled; // autostart if enabled
+            this.isRunning = enabled;
         }
     }
 
@@ -1440,7 +1921,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
 
             try {
-                // Binding a fresh Array1D handle to Helide ensures immediate BVH refit
                 Array1D freshArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                                       DataType.FLOAT32_VEC3, unrolledToOrig.length);
                 geometry.setVertexPosition(freshArray);
