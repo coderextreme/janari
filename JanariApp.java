@@ -71,12 +71,12 @@ public class JanariApp extends Application {
             }
 
             if (roots == null) {
-                System.err.println("Could not load class for: " + which + ". Falling back to BoxEm.");
+                // System.err.println("Could not load class for: " + which + ". Falling back to BoxEm.");
                 roots = new net.coderextreme.data.BoxEm();
                 modelName = "net.coderextreme.data.BoxEm";
             }
 
-            System.out.println("Loading model: " + modelName);
+            // System.out.println("Loading model: " + modelName);
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
             X3DAnariHandler handler = new X3DAnariHandler(x3dModel);
             anariPane.setHandler(handler);
@@ -85,7 +85,7 @@ public class JanariApp extends Application {
                 try {
                     Method enableAnimMethod = anariPane.getClass().getMethod(mName, boolean.class);
                     enableAnimMethod.invoke(anariPane, true);
-                    System.out.println("Configured AnariPane." + mName + "(true)");
+                    // System.out.println("Configured AnariPane." + mName + "(true)");
                     break;
                 } catch (Exception ignored) {}
             }
@@ -101,7 +101,7 @@ public class JanariApp extends Application {
                         for (String mName : List.of("requestRender", "requestRepaint", "renderLater", "repaint", "render")) {
                             try {
                                 repaintMethod = anariPane.getClass().getMethod(mName);
-                                System.out.println("Animation loop bound to: AnariPane." + mName + "()");
+                                // System.out.println("Animation loop bound to: AnariPane." + mName + "()");
                                 break;
                             } catch (Exception ignored) {}
                         }
@@ -112,7 +112,7 @@ public class JanariApp extends Application {
                                     if (n.contains("render") || n.contains("repaint")) {
                                         m.setAccessible(true);
                                         repaintMethod = m;
-                                        System.out.println("Animation loop bound to internal method: " + m.getName() + "()");
+                                        // System.out.println("Animation loop bound to internal method: " + m.getName() + "()");
                                         break;
                                     }
                                 }
@@ -130,7 +130,7 @@ public class JanariApp extends Application {
                 }
             };
             animTimer.start();
-            System.out.println("Continuous animation timer started.");
+            // System.out.println("Continuous animation timer started.");
 
             StackPane root = new StackPane(anariPane);
             Scene scene = new Scene(root, 1024, 768);
@@ -229,8 +229,8 @@ class X3DAnariHandler extends AbstractHandler {
     public void initialize(Device device) {
         super.initialize(device);
         this.device = device;
-        System.out.println("initialize(Device): world=" + world + " renderer=" + renderer
-                           + " camera=" + camera + " frame=" + frame);
+        // System.out.println("initialize(Device): world=" + world + " renderer=" + renderer
+          //                  + " camera=" + camera + " frame=" + frame);
     }
 
     @Override
@@ -238,7 +238,7 @@ class X3DAnariHandler extends AbstractHandler {
         super.updateScene(state);
         if (!built && device != null && world != null) {
             built = true;
-            System.out.println("--- Building Janari scene ---");
+            // System.out.println("--- Building Janari scene ---");
             try {
                 build(device);
             } catch (Throwable t) {
@@ -336,8 +336,8 @@ class X3DAnariHandler extends AbstractHandler {
         }
 
         if (frameCount % 30 == 0) {
-            System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | joints=%d | skinBindings=%d | displacerBindings=%d%n",
-                              nowSec, lastFrac, lastWeight, joints.size(), skinBindings.size(), activeBindings.size());
+            // System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | joints=%d | skinBindings=%d | displacerBindings=%d%n",
+               //                nowSec, lastFrac, lastWeight, joints.size(), skinBindings.size(), activeBindings.size());
         }
     }
 
@@ -389,11 +389,11 @@ class X3DAnariHandler extends AbstractHandler {
         defaultMaterial.commit();
         keepAlive.add(defaultMaterial);
 
-        System.out.println("Scanning scene tree for DEFs, Protos, and Animation nodes...");
+        // System.out.println("Scanning scene tree for DEFs, Protos, and Animation nodes...");
         buildCache(x3dModel);
         long tCache = System.currentTimeMillis() - t0;
-        System.out.println("Cache built in " + tCache + " ms: found " + defMap.size()
-                           + " DEFs, " + protoMap.size() + " Protos, " + displacers.size() + " Displacers, " + routes.size() + " ROUTEs.");
+        // System.out.println("Cache built in " + tCache + " ms: found " + defMap.size()
+        //                   + " DEFs, " + protoMap.size() + " Protos, " + displacers.size() + " Displacers, " + routes.size() + " ROUTEs.");
 
         float[] identity = { 1,0,0,0, 0,(FLIP_Y ? -1 : 1),0,0, 0,0,1,0, 0,0,0,1 };
         Object scene = null;
@@ -407,13 +407,13 @@ class X3DAnariHandler extends AbstractHandler {
             float cx = (bmin[0] + bmax[0]) / 2, cy = (bmin[1] + bmax[1]) / 2, cz = (bmin[2] + bmax[2]) / 2;
             float dx = bmax[0] - bmin[0], dy = bmax[1] - bmin[1], dz = bmax[2] - bmin[2];
             float radius = 0.5f * (float) Math.sqrt(dx*dx + dy*dy + dz*dz);
-            System.out.printf("Scene bounds: min=[%.2f, %.2f, %.2f] max=[%.2f, %.2f, %.2f]%n",
-                              bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
+            // System.out.printf("Scene bounds: min=[%.2f, %.2f, %.2f] max=[%.2f, %.2f, %.2f]%n",
+              //                 bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
             if (!viewpointSet) {
                 cameraTarget = new float[] { cx, cy, cz };
                 cameraDistance = Math.max(radius * 2.5f, 1f);
-                System.out.printf("Auto-framing camera: target=[%.2f, %.2f, %.2f] distance=%.2f%n",
-                                  cx, cy, cz, cameraDistance);
+                // System.out.printf("Auto-framing camera: target=[%.2f, %.2f, %.2f] distance=%.2f%n",
+                  //                 cx, cy, cz, cameraDistance);
             }
         }
 
@@ -448,9 +448,9 @@ class X3DAnariHandler extends AbstractHandler {
 
         world.commit();
 
-        System.out.printf("Animation initialized: %d TimeSensors, %d Interpolators, %d Displacers, %d ROUTEs, %d Bindings%n",
-                          timeSensors.size(), interpolators.size(), displacers.size(), routes.size(), activeBindings.size());
-        System.out.println("--- Janari Load Complete: " + anariInstances.size() + " shape instances in world ---");
+        // System.out.printf("Animation initialized: %d TimeSensors, %d Interpolators, %d Displacers, %d ROUTEs, %d Bindings%n",
+          //                 timeSensors.size(), interpolators.size(), displacers.size(), routes.size(), activeBindings.size());
+        // System.out.println("--- Janari Load Complete: " + anariInstances.size() + " shape instances in world ---");
     }
 
     // ------------------------------------------------------------------
@@ -477,8 +477,8 @@ class X3DAnariHandler extends AbstractHandler {
             boolean loop = extractBoolean(node, "getLoop", false);
             TimeSensorAnim ts = new TimeSensorAnim(def, interval, loop, enabled);
             timeSensors.add(ts);
-            System.out.printf("TimeSensor '%s' parsed: enabled=%b, loop=%b, cycleInterval=%.2fs%n",
-                              def, enabled, loop, interval);
+            // System.out.printf("TimeSensor '%s' parsed: enabled=%b, loop=%b, cycleInterval=%.2fs%n",
+              //                 def, enabled, loop, interval);
         }
 
         if (cName.contains("ScalarInterpolator") && def != null) {
@@ -734,8 +734,8 @@ class X3DAnariHandler extends AbstractHandler {
                         cameraDistance = Math.abs(pos[2]) > 0.001f ? Math.abs(pos[2])
                                          : (float) Math.sqrt(pos[0]*pos[0] + pos[1]*pos[1] + pos[2]*pos[2]);
                         viewpointSet = true;
-                        System.out.printf("Viewpoint configured: target=[%.2f, %.2f, 0] distance=%.2f%n",
-                                          cameraTarget[0], cameraTarget[1], cameraDistance);
+                        // System.out.printf("Viewpoint configured: target=[%.2f, %.2f, 0] distance=%.2f%n",
+                          //                 cameraTarget[0], cameraTarget[1], cameraDistance);
                     }
                 } catch (Exception ignored) {}
             }
@@ -1234,7 +1234,7 @@ class X3DAnariHandler extends AbstractHandler {
                         try {
                             img = ImageIO.read(f);
                             if (img != null) {
-                                System.out.println("Loaded texture file: " + f.getAbsolutePath());
+                                // System.out.println("Loaded texture file: " + f.getAbsolutePath());
                                 break;
                             }
                         } catch (Exception ignored) {}
@@ -1251,7 +1251,7 @@ class X3DAnariHandler extends AbstractHandler {
                         try (InputStream is = conn.getInputStream()) {
                             img = ImageIO.read(is);
                             if (img != null) {
-                                System.out.println("Downloaded texture: " + u);
+                                // System.out.println("Downloaded texture: " + u);
                                 break;
                             }
                         }
@@ -1333,7 +1333,7 @@ class X3DAnariHandler extends AbstractHandler {
                 sampler.commit();
                 keepAlive.add(sampler);
                 textureCache.put(firstUrl, sampler);
-                System.out.println("ImageTexture successfully initialized (" + width + "x" + height + "): " + firstUrl);
+                // System.out.println("ImageTexture successfully initialized (" + width + "x" + height + "): " + firstUrl);
                 return sampler;
             }
         } catch (Throwable e) {
@@ -1371,7 +1371,7 @@ class X3DAnariHandler extends AbstractHandler {
             case "IndexedFaceSet": return createIndexedFaceSet(device, x3dGeom, m, protoArgs);
             case "IndexedLineSet": return createIndexedLineSet(device, x3dGeom, m, protoArgs);
             default:
-                System.out.println("Unsupported geometry type: " + g);
+                System.err.println("Unsupported geometry type: " + g);
                 return null;
         }
     }
