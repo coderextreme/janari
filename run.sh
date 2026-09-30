@@ -17,6 +17,7 @@ export ANARI_LIBRARY=helide
 # Run with NVIDIA offload for GPU acceleration (if available)
 # -Dprism.order=sw forces software rendering for JavaFX (avoids GPU conflicts)
 __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia java \
+    -Xss1G \
     -Dprism.order=sw \
     -Djava.library.path=/tmp/anari-sdk/install/lib64 \
     --enable-native-access=ALL-UNNAMED \
