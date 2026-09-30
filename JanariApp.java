@@ -1,5 +1,6 @@
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
@@ -135,10 +136,23 @@ public class JanariApp extends Application {
             Scene scene = new Scene(root, 1024, 768);
             primaryStage.setTitle("Janari: " + modelName);
             primaryStage.setScene(scene);
+
+            primaryStage.setOnCloseRequest(event -> {
+                animTimer.stop();
+                Platform.exit();
+                System.exit(0);
+            });
+
             primaryStage.show();
         } catch (Throwable e) {
             e.printStackTrace();
         }
+    }
+
+    @Override
+    public void stop() throws Exception {
+        super.stop();
+        System.exit(0);
     }
 
     public static void main(String[] args) {
@@ -2976,3 +2990,4 @@ class X3DAnariHandler extends AbstractHandler {
         }
     }
 }
+
