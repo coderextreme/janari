@@ -31,11 +31,13 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Deque;
 import java.util.Set;
 
 public class JanariApp extends Application {
@@ -178,8 +180,17 @@ class X3DAnariHandler extends AbstractHandler {
     private final List<X3DRoute> routes = new ArrayList<>();
     private final List<TimeSensorAnim> timeSensors = new ArrayList<>();
     private final Map<String, ScalarInterpolatorAnim> interpolators = new HashMap<>();
+    private final Map<String, OrientationInterpolatorAnim> orientationInterpolators = new HashMap<>();
+    private final Map<String, PositionInterpolatorAnim> positionInterpolators = new HashMap<>();
     private final Map<String, DisplacerAnim> displacers = new HashMap<>();
     private final List<DisplacerMeshBinding> activeBindings = new ArrayList<>();
+    private final List<SkinMeshBinding> skinBindings = new ArrayList<>();
+
+    // HAnim joint state used for CPU skinning.  HAnimJoint centers are
+    // retained exactly as authored and ROUTE animation replaces rotation/
+    // translation fields just as set_rotation/set_translation would.
+    private final Map<String, JointAnim> joints = new HashMap<>();
+    private final Deque<JointAnim> jointStack = new ArrayDeque<>();
 
     private final Map<String, Object> defMap = new HashMap<>();
     private final Map<String, Object> protoMap = new HashMap<>();
@@ -214,7 +225,7 @@ class X3DAnariHandler extends AbstractHandler {
     }
 
     private void updateAnimation() {
-        if (!built || activeBindings.isEmpty() || timeSensors.isEmpty()) return;
+        if (!built || timeSensors.isEmpty()) return;
         if (animStartTime == 0) animStartTime = System.currentTimeMillis();
 
         double nowSec = (System.currentTimeMillis() - animStartTime) / 1000.0;
@@ -226,26 +237,51 @@ class X3DAnariHandler extends AbstractHandler {
 
         for (TimeSensorAnim ts : timeSensors) {
             if (!ts.enabled || !ts.isRunning) continue;
+
             if (!ts.loop && nowSec > ts.cycleInterval) {
                 ts.isRunning = false;
                 continue;
             }
-            float frac = (float) ((nowSec % ts.cycleInterval) / ts.cycleInterval);
+
+            float frac = ts.loop
+                ? (float) ((nowSec % ts.cycleInterval) / ts.cycleInterval)
+                : (float) Math.min(1.0, nowSec / ts.cycleInterval);
             lastFrac = frac;
 
+            // X3D ROUTE evaluation:
+            // TimeSensor.fraction_changed -> Interpolator.set_fraction
+            // Interpolator.value_changed -> target field.
             for (X3DRoute r : routes) {
-                if (r.fromNode.equals(ts.def) && r.fromField.equals("fraction_changed")) {
-                    ScalarInterpolatorAnim si = interpolators.get(r.toNode);
-                    if (si != null) {
-                        float weight = si.evaluate(frac);
-                        lastWeight = weight;
-                        for (X3DRoute r2 : routes) {
-                            if (r2.fromNode.equals(si.def) && r2.fromField.equals("value_changed")) {
-                                DisplacerAnim da = displacers.get(r2.toNode);
-                                if (da != null) {
-                                    da.currentWeight = weight;
-                                }
-                            }
+                if (!r.fromNode.equals(ts.def) || !"fraction_changed".equals(r.fromField)) continue;
+
+                ScalarInterpolatorAnim si = interpolators.get(r.toNode);
+                if (si != null) {
+                    float weight = si.evaluate(frac);
+                    lastWeight = weight;
+                    for (X3DRoute r2 : routes) {
+                        if (r2.fromNode.equals(si.def) && "value_changed".equals(r2.fromField)) {
+                            DisplacerAnim da = displacers.get(r2.toNode);
+                            if (da != null) da.currentWeight = weight;
+                        }
+                    }
+                }
+
+                OrientationInterpolatorAnim oi = orientationInterpolators.get(r.toNode);
+                if (oi != null) {
+                    float[] rotation = oi.evaluate(frac);
+                    for (X3DRoute r2 : routes) {
+                        if (r2.fromNode.equals(oi.def) && "value_changed".equals(r2.fromField)) {
+                            applyJointAnimation(r2.toNode, r2.toField, rotation);
+                        }
+                    }
+                }
+
+                PositionInterpolatorAnim pi = positionInterpolators.get(r.toNode);
+                if (pi != null) {
+                    float[] position = pi.evaluate(frac);
+                    for (X3DRoute r2 : routes) {
+                        if (r2.fromNode.equals(pi.def) && "value_changed".equals(r2.fromField)) {
+                            applyJointAnimation(r2.toNode, r2.toField, position);
                         }
                     }
                 }
@@ -261,6 +297,13 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        if (!skinBindings.isEmpty() && !joints.isEmpty()) {
+            for (SkinMeshBinding binding : skinBindings) {
+                binding.apply(device);
+                meshUpdated = true;
+            }
+        }
+
         if (meshUpdated && world != null) {
             try {
                 world.commit();
@@ -268,8 +311,23 @@ class X3DAnariHandler extends AbstractHandler {
         }
 
         if (frameCount % 30 == 0) {
-            System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | bindings=%d%n",
-                              nowSec, lastFrac, lastWeight, activeBindings.size());
+            System.out.printf("[Anim Telemetry] t=%.2fs | frac=%.3f | weight=%.3f | joints=%d | skinBindings=%d | displacerBindings=%d%n",
+                              nowSec, lastFrac, lastWeight, joints.size(), skinBindings.size(), activeBindings.size());
+        }
+    }
+
+    private void applyJointAnimation(String targetDef, String field, float[] value) {
+        JointAnim joint = joints.get(targetDef);
+        if (joint == null || value == null) return;
+
+        if ("set_rotation".equals(field) || "rotation".equals(field)) {
+            if (value.length >= 4) {
+                joint.rotation = new float[]{value[0], value[1], value[2], value[3]};
+            }
+        } else if ("set_translation".equals(field) || "translation".equals(field)) {
+            if (value.length >= 3) {
+                joint.translation = new float[]{value[0], value[1], value[2]};
+            }
         }
     }
 
@@ -406,6 +464,22 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        if (cName.contains("OrientationInterpolator") && def != null) {
+            float[] key = extractFloatArray(node, "getKey");
+            float[] val = extractFloatArray(node, "getKeyValue");
+            if (key != null && val != null && key.length > 0 && val.length >= 4) {
+                orientationInterpolators.put(def, new OrientationInterpolatorAnim(def, key, val));
+            }
+        }
+
+        if (cName.contains("PositionInterpolator") && def != null) {
+            float[] key = extractFloatArray(node, "getKey");
+            float[] val = extractFloatArray(node, "getKeyValue");
+            if (key != null && val != null && key.length > 0 && val.length >= 3) {
+                positionInterpolators.put(def, new PositionInterpolatorAnim(def, key, val));
+            }
+        }
+
         if (cName.contains("HAnimDisplacer") && def != null) {
             int[] ci = extractIntArray(node, "getCoordIndex");
             float[] d = extractFloatArray(node, "getDisplacements");
@@ -432,6 +506,8 @@ class X3DAnariHandler extends AbstractHandler {
         tryInvokeAndCache(node, "getChildren");
         tryInvokeAndCache(node, "getSkeleton");
         tryInvokeAndCache(node, "getSkeletonList");
+        tryInvokeAndCache(node, "getSkin");
+        tryInvokeAndCache(node, "getSkinList");
         tryInvokeAndCache(node, "getDisplacers");
         tryInvokeAndCache(node, "getDisplacerList");
         tryInvokeAndCache(node, "getAppearance");
@@ -606,7 +682,8 @@ class X3DAnariHandler extends AbstractHandler {
 
         String cName = node.getClass().getSimpleName();
         if (cName.contains("ProtoDeclare") || cName.contains("ROUTE") || cName.contains("TimeSensor")
-            || cName.contains("ScalarInterpolator")) return;
+            || cName.contains("ScalarInterpolator") || cName.contains("OrientationInterpolator")
+            || cName.contains("PositionInterpolator")) return;
 
         if (cName.contains("Background")) {
             try {
@@ -709,7 +786,24 @@ class X3DAnariHandler extends AbstractHandler {
                     try { skel = node.getClass().getMethod("getSkeletonList").invoke(node); } catch (Exception ignored) {}
                 }
                 if (skel != null) traverseList(device, skel, parentTransform, protoArgs);
-            } catch (Exception ignored) {}
+
+                // HAnim skin is a separate child of HAnimHumanoid.  It must
+                // be traversed in humanoid coordinates, not beneath the
+                // individual HAnimJoint transforms.
+                Object skin = null;
+                try { skin = node.getClass().getMethod("getSkin").invoke(node); } catch (Exception ignored) {}
+                if (skin == null) {
+                    try { skin = node.getClass().getMethod("getSkinList").invoke(node); } catch (Exception ignored) {}
+                }
+                if (skin != null) {
+                    Map<String, Object> skinArgs = new HashMap<>(protoArgs);
+                    skinArgs.put("_isSkin", Boolean.TRUE);
+                    traverseList(device, skin, parentTransform, skinArgs);
+                }
+                return;
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
 
         if (cName.contains("HAnimSegment")) {
@@ -735,8 +829,16 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // --- Transform Handling ---
+        // --- Transform / HAnimJoint Handling ---
         if (cName.contains("Transform") || cName.contains("HAnimJoint")) {
+            final boolean isJoint = cName.contains("HAnimJoint");
+            JointAnim joint = null;
+
+            if (isJoint) {
+                joint = registerJoint(node);
+                if (joint != null) jointStack.push(joint);
+            }
+
             float[] tr = null;
             float[] sc = null;
             float[] rot = null;
@@ -745,6 +847,15 @@ class X3DAnariHandler extends AbstractHandler {
             try { tr = extractFloatArray(node, "getTranslation"); } catch (Exception ignored) {}
             try { sc = extractFloatArray(node, "getScale"); } catch (Exception ignored) {}
             try { rot = extractFloatArray(node, "getRotation"); } catch (Exception ignored) {}
+
+            if (isJoint && joint != null) {
+                // HAnimJoint center is the pivot.  Its authored rotation and
+                // translation are retained as the bind/rest state.
+                if (joint.rotation == null && rot != null) joint.rotation = rot.clone();
+                if (joint.translation == null && tr != null) joint.translation = tr.clone();
+                rot = joint.rotation;
+                tr = joint.translation;
+            }
 
             try {
                 Object isNode = node.getClass().getMethod("getIS").invoke(node);
@@ -764,7 +875,12 @@ class X3DAnariHandler extends AbstractHandler {
                 }
             } catch (Exception ignored) {}
 
-            float[] localMat = buildTransformMatrix(tr, sc, rot);
+            float[] localMat;
+            if (isJoint && joint != null) {
+                localMat = buildHAnimJointMatrix(joint);
+            } else {
+                localMat = buildTransformMatrix(tr, sc, rot);
+            }
             float[] currentMat = multiplyMatrix(parentTransform, localMat);
 
             try {
@@ -773,6 +889,8 @@ class X3DAnariHandler extends AbstractHandler {
                 }
                 traverseList(device, childrenToTraverse, currentMat, protoArgs);
             } catch (Exception ignored) {}
+
+            if (isJoint && joint != null && !jointStack.isEmpty()) jointStack.pop();
             return;
         }
 
@@ -1716,7 +1834,184 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        if (Boolean.TRUE.equals(protoArgs.get("_isSkin"))) {
+            SkinMeshBinding binding = createSkinBinding(
+                geom, vArray, vSeg, nArray, nSeg, pts,
+                unrolledToOrigCoord, tris, triFaceId, vertFaces, creaseAngle
+            );
+            if (binding != null) {
+                skinBindings.add(binding);
+                System.out.printf("Bound HAnim skin: %d joints, %d render vertices%n",
+                                  binding.influencesByVertex.length == 0 ? 0 : joints.size(), totalVerts);
+            }
+        }
+
         return geom;
+    }
+
+
+    private JointAnim registerJoint(Object node) {
+        String def = extractString(node, "getDEF");
+        if (def == null || def.isEmpty()) return null;
+
+        JointAnim existing = joints.get(def);
+        if (existing != null) return existing;
+
+        float[] center = extractFloatArray(node, "getCenter");
+        if (center == null || center.length < 3) center = new float[]{0f, 0f, 0f};
+
+        float[] rotation = extractFloatArray(node, "getRotation");
+        if (rotation == null || rotation.length < 4) rotation = new float[]{0f, 0f, 1f, 0f};
+
+        float[] translation = extractFloatArray(node, "getTranslation");
+        if (translation == null || translation.length < 3) translation = new float[]{0f, 0f, 0f};
+
+        int[] skinIndex = extractIntArray(node, "getSkinCoordIndex");
+        float[] skinWeight = extractFloatArray(node, "getSkinCoordWeight");
+
+        JointAnim parent = jointStack.peek();
+        JointAnim j = new JointAnim(def, extractString(node, "getName"), center,
+                                    rotation, translation, skinIndex, skinWeight, parent);
+        joints.put(def, j);
+
+        System.out.printf("HAnimJoint '%s' name='%s' center=[%.4f %.4f %.4f] influences=%d%n",
+                          def, j.name, center[0], center[1], center[2],
+                          skinIndex == null ? 0 : skinIndex.length);
+        return j;
+    }
+
+    private static float[] buildHAnimJointMatrix(JointAnim j) {
+        float[] c = j.center;
+        float[] r = j.rotation != null ? j.rotation : new float[]{0f, 0f, 1f, 0f};
+        float[] t = j.translation != null ? j.translation : new float[]{0f, 0f, 0f};
+
+        float[] tc = translationMatrix(c[0], c[1], c[2]);
+        float[] rr = buildTransformMatrix(null, null, r);
+        float[] tnc = translationMatrix(-c[0], -c[1], -c[2]);
+        float[] pivot = multiplyMatrixStatic(multiplyMatrixStatic(tc, rr), tnc);
+        return multiplyMatrixStatic(translationMatrix(t[0], t[1], t[2]), pivot);
+    }
+
+    private static float[] translationMatrix(float x, float y, float z) {
+        return new float[]{
+            1,0,0,0,
+            0,1,0,0,
+            0,0,1,0,
+            x,y,z,1
+        };
+    }
+
+    private SkinMeshBinding createSkinBinding(Geometry.Triangle geom, Array1D vArray,
+                                              MemorySegment vSeg, Array1D nArray,
+                                              MemorySegment nSeg, float[] pts,
+                                              int[] unrolledToOrigCoord,
+                                              List<int[]> tris, List<Integer> triFaceId,
+                                              List<Integer>[] vertFaces, float creaseAngle) {
+        if (joints.isEmpty() || pts == null) return null;
+
+        int nOriginal = pts.length / 3;
+        @SuppressWarnings("unchecked")
+        List<SkinInfluence>[] influences = new List[nOriginal];
+        for (int i = 0; i < nOriginal; i++) influences[i] = new ArrayList<>();
+
+        for (JointAnim j : joints.values()) {
+            if (j.skinCoordIndex == null || j.skinCoordWeight == null) continue;
+            int n = Math.min(j.skinCoordIndex.length, j.skinCoordWeight.length);
+            for (int i = 0; i < n; i++) {
+                int coordIndex = j.skinCoordIndex[i];
+                if (coordIndex >= 0 && coordIndex < nOriginal) {
+                    float w = j.skinCoordWeight[i];
+                    if (Math.abs(w) > 1e-7f) influences[coordIndex].add(new SkinInfluence(j, w));
+                }
+            }
+        }
+
+        int influenced = 0;
+        for (List<SkinInfluence> list : influences) {
+            float sum = 0f;
+            for (SkinInfluence inf : list) sum += inf.weight;
+            if (sum > 1e-6f) {
+                for (int i = 0; i < list.size(); i++) {
+                    SkinInfluence inf = list.get(i);
+                    list.set(i, new SkinInfluence(inf.joint, inf.weight / sum));
+                }
+                influenced++;
+            }
+        }
+
+        if (influenced == 0) {
+            System.out.println("HAnim skin contains no usable skinCoordIndex/skinCoordWeight influences.");
+            return null;
+        }
+
+        // Compute bind matrices once from authored/rest joint fields.
+        computeBindMatrices();
+
+        return new SkinMeshBinding(geom, vArray, vSeg, nArray, nSeg, pts,
+                                   unrolledToOrigCoord, tris, triFaceId, vertFaces,
+                                   creaseAngle, influences);
+    }
+
+    private void computeBindMatrices() {
+        for (JointAnim j : joints.values()) {
+            computeBindMatrix(j);
+        }
+    }
+
+    private float[] computeBindMatrix(JointAnim j) {
+        if (j.bindMatrix != null) return j.bindMatrix;
+        float[] oldRot = j.rotation;
+        float[] oldTrans = j.translation;
+        // bindMatrix is the authored rest pose.  Since animation state is
+        // initialized from those same fields this is stable across frames.
+        float[] local = buildHAnimJointMatrix(j);
+        j.bindMatrix = j.parent == null
+            ? local
+            : multiplyMatrixStatic(computeBindMatrix(j.parent), local);
+        return j.bindMatrix;
+    }
+
+    private float[] computeCurrentJointMatrix(JointAnim j, Map<JointAnim, float[]> cache) {
+        float[] cached = cache.get(j);
+        if (cached != null) return cached;
+
+        float[] local = buildHAnimJointMatrix(j);
+        float[] current = j.parent == null
+            ? local
+            : multiplyMatrixStatic(computeCurrentJointMatrix(j.parent, cache), local);
+        cache.put(j, current);
+        return current;
+    }
+
+    private static float[] invertRigidMatrix(float[] m) {
+        // Joint transforms are rigid (no scale).  Invert the 3x3 rotation and
+        // translation using the transpose.
+        float[] r = {
+            m[0],m[1],m[2],0,
+            m[4],m[5],m[6],0,
+            m[8],m[9],m[10],0,
+            0,0,0,1
+        };
+        r[12] = -(r[0]*m[12] + r[4]*m[13] + r[8]*m[14]);
+        r[13] = -(r[1]*m[12] + r[5]*m[13] + r[9]*m[14]);
+        r[14] = -(r[2]*m[12] + r[6]*m[13] + r[10]*m[14]);
+        return r;
+    }
+
+    private static float[] transformPoint(float[] m, float x, float y, float z) {
+        return new float[]{
+            m[0]*x + m[4]*y + m[8]*z + m[12],
+            m[1]*x + m[5]*y + m[9]*z + m[13],
+            m[2]*x + m[6]*y + m[10]*z + m[14]
+        };
+    }
+
+    private static float[] transformVector(float[] m, float x, float y, float z) {
+        return new float[]{
+            m[0]*x + m[4]*y + m[8]*z,
+            m[1]*x + m[5]*y + m[9]*z,
+            m[2]*x + m[6]*y + m[10]*z
+        };
     }
 
     private static void processFace(float[] pts, List<Integer> faceCoord, List<Integer> faceUV,
@@ -1741,6 +2036,27 @@ class X3DAnariHandler extends AbstractHandler {
         for (int k = startTris; k < tris.size(); k++) {
             triFaceId.add(faceId);
         }
+    }
+
+    private static List<float[]> recomputeFaceNormals(float[] pts, List<int[]> tris,
+                                                        List<Integer> triFaceId) {
+        int maxFaceId = 0;
+        for (int id : triFaceId) if (id > maxFaceId) maxFaceId = id;
+        List<float[]> normals = new ArrayList<>(maxFaceId + 1);
+        for (int i=0;i<=maxFaceId;i++) normals.add(new float[3]);
+
+        for (int t=0;t<tris.size();t++) {
+            int[] tri=tris.get(t);
+            int a=tri[0]*3,b=tri[1]*3,c=tri[2]*3;
+            float abx=pts[b]-pts[a], aby=pts[b+1]-pts[a+1], abz=pts[b+2]-pts[a+2];
+            float acx=pts[c]-pts[a], acy=pts[c+1]-pts[a+1], acz=pts[c+2]-pts[a+2];
+            float[] n=normals.get(triFaceId.get(t));
+            n[0]+=aby*acz-abz*acy;
+            n[1]+=abz*acx-abx*acz;
+            n[2]+=abx*acy-aby*acx;
+        }
+        for(float[] n:normals) normalize(n);
+        return normals;
     }
 
     private static float[] computeSmoothNormals(float[] pts, List<int[]> tris, List<Integer> triFaceId,
@@ -1955,6 +2271,279 @@ class X3DAnariHandler extends AbstractHandler {
             }
             return keyValue[0];
         }
+    }
+
+    private static class OrientationInterpolatorAnim {
+        final String def;
+        final float[] key;
+        final float[] keyValue;
+
+        OrientationInterpolatorAnim(String def, float[] key, float[] keyValue) {
+            this.def = def;
+            this.key = key;
+            this.keyValue = keyValue;
+        }
+
+        float[] evaluate(float fraction) {
+            int count = keyValue.length / 4;
+            if (count == 0) return new float[]{0,0,1,0};
+            if (fraction <= key[0]) return axisAngle(keyValue, 0);
+            if (fraction >= key[key.length - 1]) return axisAngle(keyValue, count - 1);
+
+            for (int i = 0; i < key.length - 1; i++) {
+                if (fraction >= key[i] && fraction <= key[i + 1]) {
+                    float span = key[i + 1] - key[i];
+                    float alpha = span > 1e-6f ? (fraction - key[i]) / span : 0f;
+                    return slerpAxisAngle(axisAngle(keyValue, i), axisAngle(keyValue, i + 1), alpha);
+                }
+            }
+            return axisAngle(keyValue, count - 1);
+        }
+    }
+
+    private static class PositionInterpolatorAnim {
+        final String def;
+        final float[] key;
+        final float[] keyValue;
+
+        PositionInterpolatorAnim(String def, float[] key, float[] keyValue) {
+            this.def = def;
+            this.key = key;
+            this.keyValue = keyValue;
+        }
+
+        float[] evaluate(float fraction) {
+            int count = keyValue.length / 3;
+            if (count == 0) return new float[]{0,0,0};
+            if (fraction <= key[0]) return vec3(keyValue, 0);
+            if (fraction >= key[key.length - 1]) return vec3(keyValue, count - 1);
+
+            for (int i = 0; i < key.length - 1; i++) {
+                if (fraction >= key[i] && fraction <= key[i + 1]) {
+                    float span = key[i + 1] - key[i];
+                    float a = span > 1e-6f ? (fraction - key[i]) / span : 0f;
+                    int p = i * 3, q = (i + 1) * 3;
+                    return new float[]{
+                        keyValue[p] + a * (keyValue[q] - keyValue[p]),
+                        keyValue[p+1] + a * (keyValue[q+1] - keyValue[p+1]),
+                        keyValue[p+2] + a * (keyValue[q+2] - keyValue[p+2])
+                    };
+                }
+            }
+            return vec3(keyValue, count - 1);
+        }
+    }
+
+    private static float[] vec3(float[] v, int i) {
+        return new float[]{v[i*3], v[i*3+1], v[i*3+2]};
+    }
+
+    private static float[] axisAngle(float[] v, int i) {
+        return new float[]{v[i*4], v[i*4+1], v[i*4+2], v[i*4+3]};
+    }
+
+    private static float[] axisAngleToQuat(float[] aa) {
+        float ax = aa[0], ay = aa[1], az = aa[2], angle = aa[3];
+        float len = (float)Math.sqrt(ax*ax + ay*ay + az*az);
+        if (len < 1e-8f || Math.abs(angle) < 1e-8f) return new float[]{1,0,0,0};
+        ax /= len; ay /= len; az /= len;
+        float h = angle * 0.5f, s = (float)Math.sin(h);
+        return new float[]{(float)Math.cos(h), ax*s, ay*s, az*s};
+    }
+
+    private static float[] slerpAxisAngle(float[] a, float[] b, float t) {
+        float[] qa = axisAngleToQuat(a), qb = axisAngleToQuat(b);
+        float dot = qa[0]*qb[0] + qa[1]*qb[1] + qa[2]*qb[2] + qa[3]*qb[3];
+        if (dot < 0f) {
+            dot = -dot;
+            for (int i=0;i<4;i++) qb[i] = -qb[i];
+        }
+
+        float w1, w2;
+        if (dot > 0.9995f) {
+            w1 = 1f - t; w2 = t;
+        } else {
+            double theta = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
+            double sinTheta = Math.sin(theta);
+            w1 = (float)(Math.sin((1.0-t)*theta)/sinTheta);
+            w2 = (float)(Math.sin(t*theta)/sinTheta);
+        }
+
+        float w = w1*qa[0] + w2*qb[0];
+        float x = w1*qa[1] + w2*qb[1];
+        float y = w1*qa[2] + w2*qb[2];
+        float z = w1*qa[3] + w2*qb[3];
+        float len = (float)Math.sqrt(w*w+x*x+y*y+z*z);
+        if (len > 1e-8f) { w/=len; x/=len; y/=len; z/=len; }
+
+        float angle = 2f * (float)Math.acos(Math.max(-1f, Math.min(1f, w)));
+        float sinHalf = (float)Math.sqrt(Math.max(0f, 1f-w*w));
+        if (sinHalf < 1e-6f) return new float[]{1,0,0,0};
+        return new float[]{x/sinHalf, y/sinHalf, z/sinHalf, angle};
+    }
+
+    private static class JointAnim {
+        final String def;
+        final String name;
+        final float[] center;
+        final int[] skinCoordIndex;
+        final float[] skinCoordWeight;
+        final JointAnim parent;
+        float[] rotation;
+        float[] translation;
+        float[] bindMatrix;
+
+        JointAnim(String def, String name, float[] center, float[] rotation,
+                  float[] translation, int[] skinCoordIndex,
+                  float[] skinCoordWeight, JointAnim parent) {
+            this.def = def;
+            this.name = name != null ? name : def;
+            this.center = center.clone();
+            this.rotation = rotation.clone();
+            this.translation = translation.clone();
+            this.skinCoordIndex = skinCoordIndex;
+            this.skinCoordWeight = skinCoordWeight;
+            this.parent = parent;
+        }
+    }
+
+    private static class SkinInfluence {
+        final JointAnim joint;
+        final float weight;
+        SkinInfluence(JointAnim joint, float weight) {
+            this.joint = joint;
+            this.weight = weight;
+        }
+    }
+
+    private class SkinMeshBinding {
+        final Geometry.Triangle geometry;
+        Array1D vArray;
+        final MemorySegment vSeg;
+        Array1D nArray;
+        final MemorySegment nSeg;
+        final float[] baseCoords;
+        final int[] unrolledToOrig;
+        final List<int[]> tris;
+        final List<Integer> triFaceId;
+        final List<Integer>[] vertFaces;
+        final float creaseAngle;
+        final List<SkinInfluence>[] influencesByVertex;
+
+        SkinMeshBinding(Geometry.Triangle geometry, Array1D vArray, MemorySegment vSeg,
+                        Array1D nArray, MemorySegment nSeg, float[] baseCoords,
+                        int[] unrolledToOrig, List<int[]> tris, List<Integer> triFaceId,
+                        List<Integer>[] vertFaces, float creaseAngle,
+                        List<SkinInfluence>[] influencesByVertex) {
+            this.geometry = geometry;
+            this.vArray = vArray;
+            this.vSeg = vSeg;
+            this.nArray = nArray;
+            this.nSeg = nSeg;
+            this.baseCoords = baseCoords.clone();
+            this.unrolledToOrig = unrolledToOrig;
+            this.tris = tris;
+            this.triFaceId = triFaceId;
+            this.vertFaces = vertFaces;
+            this.creaseAngle = creaseAngle;
+            this.influencesByVertex = influencesByVertex;
+        }
+
+        void apply(Device device) {
+            Map<JointAnim, float[]> current = new HashMap<>();
+            Map<JointAnim, float[]> skinMatrices = new HashMap<>();
+
+            for (JointAnim j : joints.values()) {
+                float[] currentMatrix = computeCurrentJointMatrix(j, current);
+                float[] inverseBind = invertRigidMatrix(j.bindMatrix);
+                skinMatrices.put(j, multiplyMatrixStatic(currentMatrix, inverseBind));
+            }
+
+            float[] source = baseCoords.clone();
+            // HAnimDisplacer modifies the humanoid skin coordinates before
+            // joint skinning.  This is how JoeKickAnimation's skull action
+            // participates in the same animated skin.
+            for (DisplacerAnim da : displacers.values()) {
+                if (da.currentWeight == 0f || da.coordIndex == null || da.displacements == null) continue;
+                int n = Math.min(da.coordIndex.length, da.displacements.length / 3);
+                for (int i = 0; i < n; i++) {
+                    int c = da.coordIndex[i];
+                    if (c >= 0 && c*3+2 < source.length) {
+                        source[c*3]     += da.currentWeight * da.displacements[i*3];
+                        source[c*3 + 1] += da.currentWeight * da.displacements[i*3 + 1];
+                        source[c*3 + 2] += da.currentWeight * da.displacements[i*3 + 2];
+                    }
+                }
+            }
+
+            float[] deformed = new float[baseCoords.length];
+            for (int i = 0; i < influencesByVertex.length; i++) {
+                float bx = source[i*3], by = source[i*3+1], bz = source[i*3+2];
+                List<SkinInfluence> infs = influencesByVertex[i];
+
+                if (infs.isEmpty()) {
+                    deformed[i*3] = bx;
+                    deformed[i*3+1] = by;
+                    deformed[i*3+2] = bz;
+                    continue;
+                }
+
+                float x=0, y=0, z=0, sum=0;
+                for (SkinInfluence inf : infs) {
+                    float[] p = transformPoint(skinMatrices.get(inf.joint), bx, by, bz);
+                    x += inf.weight*p[0];
+                    y += inf.weight*p[1];
+                    z += inf.weight*p[2];
+                    sum += inf.weight;
+                }
+                if (sum > 1e-6f) {
+                    deformed[i*3] = x / sum;
+                    deformed[i*3+1] = y / sum;
+                    deformed[i*3+2] = z / sum;
+                } else {
+                    deformed[i*3] = bx;
+                    deformed[i*3+1] = by;
+                    deformed[i*3+2] = bz;
+                }
+            }
+
+            float[] unrolled = new float[unrolledToOrig.length * 3];
+            for (int v=0; v<unrolledToOrig.length; v++) {
+                int c = unrolledToOrig[v];
+                unrolled[v*3] = deformed[c*3];
+                unrolled[v*3+1] = deformed[c*3+1];
+                unrolled[v*3+2] = deformed[c*3+2];
+                long off=(long)v*3*Float.BYTES;
+                vSeg.set(ValueLayout.JAVA_FLOAT, off, unrolled[v*3]);
+                vSeg.set(ValueLayout.JAVA_FLOAT, off+Float.BYTES, unrolled[v*3+1]);
+                vSeg.set(ValueLayout.JAVA_FLOAT, off+2*Float.BYTES, unrolled[v*3+2]);
+            }
+
+            float[] normals = computeSmoothNormals(deformed, tris, triFaceId,
+                                                    recomputeFaceNormals(deformed, tris, triFaceId),
+                                                    vertFaces, creaseAngle, unrolledToOrig);
+            for (int v=0; v<unrolledToOrig.length; v++) {
+                long off=(long)v*3*Float.BYTES;
+                nSeg.set(ValueLayout.JAVA_FLOAT, off, normals[v*3]);
+                nSeg.set(ValueLayout.JAVA_FLOAT, off+Float.BYTES, normals[v*3+1]);
+                nSeg.set(ValueLayout.JAVA_FLOAT, off+2*Float.BYTES, normals[v*3+2]);
+            }
+
+            try {
+                Array1D fresh = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                                  DataType.FLOAT32_VEC3, unrolledToOrig.length);
+                fresh.commit();
+                geometry.setVertexPosition(fresh);
+                Array1D freshN = device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                                   DataType.FLOAT32_VEC3, unrolledToOrig.length);
+                freshN.commit();
+                setAnariObjectParameter(geometry, "vertex.normal", DataType.ARRAY1D, freshN);
+                geometry.commit();
+                vArray = fresh;
+                nArray = freshN;
+            } catch (Throwable ignored) {}
+        }
+
     }
 
     private static class DisplacerAnim {
