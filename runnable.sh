@@ -1,3 +1,4 @@
+bash run.sh net/coderextreme/data/mobius.java
 bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
 bash run.sh net/coderextreme/data/JoeKickAnimation.java
 bash run.sh net/coderextreme/data/rubikOnFire.java

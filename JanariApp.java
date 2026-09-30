@@ -45,7 +45,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class JanariApp extends Application {
-    private static String modelName = "rubikOnFire";
+    private static String modelName = "rubik";
 
     @Override
     public void start(Stage primaryStage) {
@@ -58,7 +58,9 @@ public class JanariApp extends Application {
             List<String> candidateClasses = List.of(
                 which,
                 "net.coderextreme.data." + which,
-                "net.coderextreme." + which
+                "net.coderextreme." + which,
+                "net.coderextreme.data.rubik",
+                "net.coderextreme.data.rubikOnFire"
             );
 
             for (String cName : candidateClasses) {
@@ -74,8 +76,8 @@ public class JanariApp extends Application {
             }
 
             if (roots == null) {
-                roots = new net.coderextreme.data.rubikOnFire();
-                modelName = "net.coderextreme.data.rubikOnFire";
+                roots = new net.coderextreme.data.rubik();
+                modelName = "net.coderextreme.data.rubik";
             }
 
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
@@ -781,6 +783,44 @@ class AnariContext {
 // ============================================================================
 
 class X3DTypeAdapter {
+    static String cleanQuotes(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        while (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s.replace("\"", "").trim();
+    }
+
+    static List<?> getListFromNode(Object node, String... candidateMethods) {
+        if (node == null) return Collections.emptyList();
+        for (String mName : candidateMethods) {
+            try {
+                Method m = node.getClass().getMethod(mName);
+                if (m.getParameterCount() == 0) {
+                    Object res = m.invoke(node);
+                    if (res instanceof List<?>) return (List<?>) res;
+                    if (res instanceof Object[]) return List.of((Object[]) res);
+                }
+            } catch (Exception ignored) {}
+        }
+        for (Method m : node.getClass().getMethods()) {
+            if (m.getParameterCount() == 0) {
+                String lc = m.getName().toLowerCase();
+                for (String c : candidateMethods) {
+                    if (lc.equals(c.toLowerCase()) || lc.equals("get" + c.toLowerCase())) {
+                        try {
+                            Object res = m.invoke(node);
+                            if (res instanceof List<?>) return (List<?>) res;
+                            if (res instanceof Object[]) return List.of((Object[]) res);
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        }
+        return Collections.emptyList();
+    }
+
     static Object unwrapNode(Object o) {
         if (o == null) return null;
         if (o instanceof List<?>) {
@@ -804,18 +844,16 @@ class X3DTypeAdapter {
 
     static Object extractFieldValue(Object fv) {
         if (fv == null) return null;
-        Object fVal = X3DTypeAdapter.asString(fv, "getValue");
-        if (fVal != null && !fVal.toString().trim().isEmpty()) {
-            return fVal;
+        for (String m : List.of("getValue", "getValueString", "getValueStr")) {
+            String s = asString(fv, m);
+            if (s != null && !s.isEmpty()) return s;
         }
         for (String m : List.of("getChildren", "getChildrenList", "getChildList", "getNodes", "findChildren")) {
-            try {
-                Object res = fv.getClass().getMethod(m).invoke(fv);
-                if (res != null) {
-                    Object unwrapped = unwrapNode(res);
-                    if (unwrapped != null) return unwrapped;
-                }
-            } catch (Exception ignored) {}
+            List<?> list = getListFromNode(fv, m);
+            if (!list.isEmpty()) {
+                Object unwrapped = unwrapNode(list);
+                if (unwrapped != null) return unwrapped;
+            }
         }
         Class<?> cl = fv.getClass();
         while (cl != null && cl != Object.class) {
@@ -823,9 +861,14 @@ class X3DTypeAdapter {
                 f.setAccessible(true);
                 try {
                     Object res = f.get(fv);
-                    if (res != null && !(res instanceof String)) {
-                        Object unwrapped = unwrapNode(res);
-                        if (unwrapped != null) return unwrapped;
+                    if (res != null) {
+                        if (res instanceof String) {
+                            String s = cleanQuotes((String) res);
+                            if (!s.isEmpty()) return s;
+                        } else {
+                            Object unwrapped = unwrapNode(res);
+                            if (unwrapped != null) return unwrapped;
+                        }
                     }
                 } catch (Exception ignored) {}
             }
@@ -856,9 +899,28 @@ class X3DTypeAdapter {
     }
 
     static String asString(Object node, String method) {
+        if (node == null) return null;
         try {
-            Object res = node.getClass().getMethod(method).invoke(node);
-            return res != null ? res.toString().trim() : null;
+            Object res = null;
+            try {
+                Method m = node.getClass().getMethod(method);
+                res = m.invoke(node);
+            } catch (NoSuchMethodException e) {
+                for (Method m : node.getClass().getMethods()) {
+                    if (m.getParameterCount() == 0 && m.getName().equalsIgnoreCase(method)) {
+                        res = m.invoke(node);
+                        break;
+                    }
+                }
+            }
+            if (res == null) return null;
+            if (res instanceof String) return cleanQuotes((String) res);
+            try {
+                Method mVal = res.getClass().getMethod("getValue");
+                Object v = mVal.invoke(res);
+                if (v != null) return cleanQuotes(v.toString());
+            } catch (Exception ignored) {}
+            return cleanQuotes(res.toString());
         } catch (Exception ignored) { return null; }
     }
 
@@ -904,10 +966,22 @@ class X3DTypeAdapter {
     static float[] toFloatArray(Object o) {
         if (o == null) return null;
         if (o instanceof float[]) return (float[]) o;
+        if (o instanceof double[]) {
+            double[] da = (double[]) o;
+            float[] fa = new float[da.length];
+            for (int i = 0; i < da.length; i++) fa[i] = (float) da[i];
+            return fa;
+        }
         for (String mName : List.of("getValue", "getArray")) {
             try {
                 Object res = o.getClass().getMethod(mName).invoke(o);
                 if (res instanceof float[]) return (float[]) res;
+                if (res instanceof double[]) {
+                    double[] da = (double[]) res;
+                    float[] fa = new float[da.length];
+                    for (int i = 0; i < da.length; i++) fa[i] = (float) da[i];
+                    return fa;
+                }
             } catch (Exception ignored) {}
         }
         return null;
@@ -1017,32 +1091,44 @@ class X3DTypeAdapter {
     static float[] parseVec3(Object val) {
         if (val == null) return null;
         if (val instanceof float[]) return (float[]) val;
-        String s = val.toString().trim();
+        if (val instanceof double[]) {
+            double[] d = (double[]) val;
+            return new float[]{(float) d[0], (float) d[1], (float) d[2]};
+        }
+        try {
+            Method mVal = val.getClass().getMethod("getValue");
+            Object v = mVal.invoke(val);
+            if (v instanceof float[]) return (float[]) v;
+            if (v != null && v != val) return parseVec3(v);
+        } catch (Exception ignored) {}
+        String s = cleanQuotes(val.toString());
         String[] p = s.split("[,\\s]+");
         if (p.length >= 3) {
             try { return new float[]{ Float.parseFloat(p[0]), Float.parseFloat(p[1]), Float.parseFloat(p[2]) }; }
             catch (Exception ignored) {}
         }
-        try {
-            Object v = val.getClass().getMethod("getValue").invoke(val);
-            if (v instanceof float[]) return (float[]) v;
-        } catch (Exception ignored) {}
         return null;
     }
 
     static float[] parseVec4(Object val) {
         if (val == null) return null;
         if (val instanceof float[]) return (float[]) val;
-        String s = val.toString().trim();
+        if (val instanceof double[]) {
+            double[] d = (double[]) val;
+            return new float[]{(float) d[0], (float) d[1], (float) d[2], (float) d[3]};
+        }
+        try {
+            Method mVal = val.getClass().getMethod("getValue");
+            Object v = mVal.invoke(val);
+            if (v instanceof float[]) return (float[]) v;
+            if (v != null && v != val) return parseVec4(v);
+        } catch (Exception ignored) {}
+        String s = cleanQuotes(val.toString());
         String[] p = s.split("[,\\s]+");
         if (p.length >= 4) {
             try { return new float[]{ Float.parseFloat(p[0]), Float.parseFloat(p[1]), Float.parseFloat(p[2]), Float.parseFloat(p[3]) }; }
             catch (Exception ignored) {}
         }
-        try {
-            Object v = val.getClass().getMethod("getValue").invoke(val);
-            if (v instanceof float[]) return (float[]) v;
-        } catch (Exception ignored) {}
         return null;
     }
 }
@@ -1064,7 +1150,7 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
             try {
                 Object isNode = (delegate != null) ? delegate.getIS() : getIS();
                 if (isNode != null) {
-                    List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                    List<?> connects = X3DTypeAdapter.getListFromNode(isNode, "getConnect", "getConnectList", "getConnects");
                     for (Object c : connects) {
                         String nField = X3DTypeAdapter.asString(c, "getNodeField");
                         String pField = X3DTypeAdapter.asString(c, "getProtoField");
@@ -1134,6 +1220,11 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
             if (gName.equals("LineSet") || x3dGeom instanceof org.web3d.x3d.jsail.Rendering.LineSet) {
                 AnariLineSet lineSet = AnariNodeFactory.adaptLineSet(x3dGeom);
                 lineSet.renderLines(ctx, parentTransform, mat, app);
+                return;
+            }
+            if (x3dGeom.getClass().getSimpleName().contains("LineSet")) {
+                AnariLineSet lineSet = AnariNodeFactory.adaptRegularLineSet(x3dGeom);
+                lineSet.renderLines(ctx, parentTransform, mat, null);
                 return;
             }
 
@@ -1209,9 +1300,8 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
 
                 if (mat != null || isSkin || d != null) {
                     if (d == null) d = new float[]{ 0.32f, 0.36f, 0.44f };
-                    float[] c = (d == null) ? new float[]{0.32f, 0.36f, 0.44f}
-                                            : ((d.length >= 3 && (isSkin || mat != null))
-                                               ? ctx.displayColor(d[0], d[1], d[2]) : d);
+                    float[] c = (d.length >= 3 && (isSkin || mat != null))
+                                   ? ctx.displayColor(d[0], d[1], d[2]) : d;
                     float opacity = Math.max(0f, Math.min(1f, 1f - transparency));
 
                     Material.Matte m = ctx.device.newMaterial(Material.SubType.MATTE);
@@ -1303,10 +1393,7 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 } catch (Exception ignored) {}
             }
 
-            if (urls == null || urls.length == 0) {
-                System.err.println("[texture] ImageTexture has no url (unresolved USE?) " + X3DTypeAdapter.asString(imageTexture, "getUSE"));
-                return null;
-            }
+            if (urls == null || urls.length == 0) return null;
             String firstUrl = urls[0];
             String cacheKey = firstUrl + "_raw";
             if (ctx.textureCache.containsKey(cacheKey)) return ctx.textureCache.get(cacheKey);
@@ -1363,13 +1450,11 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
             }
 
             if (img == null) {
-                System.err.println("[texture] FAILED to load any of: " + Arrays.toString(urls) + " (cwd=" + new File(".").getAbsolutePath() + ")");
                 ctx.textureCache.put(cacheKey, null);
                 return null;
             }
 
             int width = img.getWidth(), height = img.getHeight();
-            System.err.println("[texture] loaded " + firstUrl + " " + width + "x" + height);
             byte[] rgba = new byte[width * height * 4];
             int k = 0;
 
@@ -1406,16 +1491,11 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
             if (sampler != null) {
                 ctx.setAnariObjectParameter(sampler, "image", DataType.ARRAY2D, imgArray);
 
-                boolean inAttrSet = false;
                 try {
                     Method mAttr = sampler.getClass().getMethod("setInAttribute", String.class);
                     mAttr.invoke(sampler, "attribute0");
-                    inAttrSet = true;
-                } catch (Throwable ignored) {}
-                if (!inAttrSet) {
-                    try {
-                        sampler.set("inAttribute", DataType.STRING, ctx.arena.allocateFrom("attribute0\0", StandardCharsets.UTF_8));
-                    } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {
+                    try { sampler.set("inAttribute", DataType.STRING, ctx.arena.allocateFrom("attribute0\0", StandardCharsets.UTF_8)); } catch (Throwable ignored2) {}
                 }
 
                 boolean repeatS = X3DTypeAdapter.asBoolean(imageTexture, "getRepeatS", true);
@@ -1425,23 +1505,15 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                     for (String wn : List.of("setWrapMode1", "setWrap1")) {
                         try { mWrap1 = sampler.getClass().getMethod(wn, String.class); break; } catch (NoSuchMethodException ignoredNs) {}
                     }
-                    if (mWrap1 == null) throw new NoSuchMethodException("wrapMode1");
-                    mWrap1.invoke(sampler, repeatS ? "repeat" : "clampToEdge");
-                } catch (Throwable ignored) {
-                    try { sampler.set("wrapMode1", DataType.STRING, ctx.arena.allocateFrom((repeatS ? "repeat\0" : "clampToEdge\0"), StandardCharsets.UTF_8)); } catch (Throwable ignored3) {}
-                    try { sampler.set("wrap1", DataType.STRING, ctx.arena.allocateFrom((repeatS ? "repeat\0" : "clampToEdge\0"), StandardCharsets.UTF_8)); } catch (Throwable ignored2) {}
-                }
+                    if (mWrap1 != null) mWrap1.invoke(sampler, repeatS ? "repeat" : "clampToEdge");
+                } catch (Throwable ignored) {}
                 try {
                     Method mWrap2 = null;
                     for (String wn : List.of("setWrapMode2", "setWrap2")) {
                         try { mWrap2 = sampler.getClass().getMethod(wn, String.class); break; } catch (NoSuchMethodException ignoredNs) {}
                     }
-                    if (mWrap2 == null) throw new NoSuchMethodException("wrapMode2");
-                    mWrap2.invoke(sampler, repeatT ? "repeat" : "clampToEdge");
-                } catch (Throwable ignored) {
-                    try { sampler.set("wrapMode2", DataType.STRING, ctx.arena.allocateFrom((repeatT ? "repeat\0" : "clampToEdge\0"), StandardCharsets.UTF_8)); } catch (Throwable ignored3) {}
-                    try { sampler.set("wrap2", DataType.STRING, ctx.arena.allocateFrom((repeatT ? "repeat\0" : "clampToEdge\0"), StandardCharsets.UTF_8)); } catch (Throwable ignored2) {}
-                }
+                    if (mWrap2 != null) mWrap2.invoke(sampler, repeatT ? "repeat" : "clampToEdge");
+                } catch (Throwable ignored) {}
 
                 sampler.commit();
                 ctx.keepAlive.add(sampler);
@@ -1546,23 +1618,15 @@ class AnariSegment extends org.web3d.x3d.jsail.HAnim.HAnimSegment implements Ana
     public void render(AnariContext ctx, float[] parentTransform, Map<String, Object> protoArgs) {
         Object seg = (delegate != null) ? delegate : this;
         List<X3DAnariHandler.DisplacerAnim> segDisplacers = new ArrayList<>();
-        for (String mName : List.of("getDisplacers", "getDisplacerList")) {
-            try {
-                Object res = seg.getClass().getMethod(mName).invoke(seg);
-                List<?> list = (res instanceof List<?>) ? (List<?>) res
-                             : (res instanceof Object[]) ? List.of((Object[]) res) : null;
-                if (list != null) {
-                    for (Object dObj : list) {
-                        String dDef = X3DTypeAdapter.asString(dObj, "getDEF");
-                        String dName = X3DTypeAdapter.asString(dObj, "getName");
-                        if (dDef != null && ctx.displacers.containsKey(dDef)) {
-                            segDisplacers.add(ctx.displacers.get(dDef));
-                        } else if (dName != null && ctx.displacers.containsKey(dName)) {
-                            segDisplacers.add(ctx.displacers.get(dName));
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
+        List<?> list = X3DTypeAdapter.getListFromNode(seg, "getDisplacers", "getDisplacerList");
+        for (Object dObj : list) {
+            String dDef = X3DTypeAdapter.asString(dObj, "getDEF");
+            String dName = X3DTypeAdapter.asString(dObj, "getName");
+            if (dDef != null && ctx.displacers.containsKey(dDef)) {
+                segDisplacers.add(ctx.displacers.get(dDef));
+            } else if (dName != null && ctx.displacers.containsKey(dName)) {
+                segDisplacers.add(ctx.displacers.get(dName));
+            }
         }
         Map<String, Object> childArgs = protoArgs;
         if (!segDisplacers.isEmpty()) {
@@ -1612,13 +1676,18 @@ class AnariTransform extends org.web3d.x3d.jsail.Grouping.Transform implements A
         Object childrenToTraverse = null;
 
         try {
-            Object isNode = node.getClass().getMethod("getIS").invoke(node);
+            Object isNode = null;
+            for (String m : List.of("getIS", "getIs")) {
+                try { isNode = node.getClass().getMethod(m).invoke(node); if (isNode != null) break; } catch (Exception ignored) {}
+            }
             if (isNode != null) {
-                List<?> connects = (List<?>) isNode.getClass().getMethod("getConnectList").invoke(isNode);
+                List<?> connects = X3DTypeAdapter.getListFromNode(isNode, "getConnect", "getConnectList", "getConnects");
                 for (Object c : connects) {
                     String nField = X3DTypeAdapter.asString(c, "getNodeField");
                     String pField = X3DTypeAdapter.asString(c, "getProtoField");
-                    if (protoArgs.containsKey(pField)) {
+                    if (nField != null) nField = X3DTypeAdapter.cleanQuotes(nField);
+                    if (pField != null) pField = X3DTypeAdapter.cleanQuotes(pField);
+                    if (pField != null && protoArgs.containsKey(pField)) {
                         Object val = protoArgs.get(pField);
                         if ("translation".equals(nField)) tr = X3DTypeAdapter.parseVec3(val);
                         else if ("scale".equals(nField)) sc = X3DTypeAdapter.parseVec3(val);
@@ -1693,16 +1762,37 @@ class AnariLineHelper {
         return ctx.displayColor(colors[cIdx * stride], colors[cIdx * stride + 1], colors[cIdx * stride + 2]);
     }
 
+    private static int colorKey(float[] c) {
+        if (c == null || c.length < 3) return 0xFFFFFF;
+        int r = Math.max(0, Math.min(255, Math.round(c[0] * 255f)));
+        int g = Math.max(0, Math.min(255, Math.round(c[1] * 255f)));
+        int b = Math.max(0, Math.min(255, Math.round(c[2] * 255f)));
+        return (r << 16) | (g << 8) | b;
+    }
+
     static void renderSegments(AnariContext ctx, float[] pts, List<LineSegmentDef> segments,
                                float[] m, float[] defaultLineCol, float lineWidthScale) {
         try {
             if (segments == null || segments.isEmpty()) return;
-            List<Surface> surfaces = new ArrayList<>();
+
+            // Batch segments by color so they share geometries and materials
+            Map<Integer, List<LineSegmentDef>> colorGroups = new LinkedHashMap<>();
+            Map<Integer, float[]> colorMap = new HashMap<>();
+
             for (LineSegmentDef seg : segments) {
-                Geometry.Triangle geom = buildTubeGeometry(ctx, pts, List.of(seg), m, lineWidthScale);
+                float[] col = seg.c0 != null ? seg.c0 : defaultLineCol;
+                int key = colorKey(col);
+                colorGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(seg);
+                colorMap.putIfAbsent(key, col);
+            }
+
+            List<Surface> surfaces = new ArrayList<>();
+            for (Map.Entry<Integer, List<LineSegmentDef>> entry : colorGroups.entrySet()) {
+                List<LineSegmentDef> groupSegs = entry.getValue();
+                Geometry.Triangle geom = buildTubeGeometry(ctx, pts, groupSegs, m, lineWidthScale);
                 if (geom == null) continue;
 
-                float[] col = seg.c0 != null ? seg.c0 : defaultLineCol;
+                float[] col = colorMap.get(entry.getKey());
                 Material.Matte segMat = ctx.device.newMaterial(Material.SubType.MATTE);
                 segMat.setColor(col[0], col[1], col[2]);
                 segMat.commit();
@@ -1750,6 +1840,7 @@ class AnariLineHelper {
         float totalSegLen = 0f;
         int validSegCount = 0;
         for (LineSegmentDef seg : segments) {
+            if (seg.p0 < 0 || seg.p1 < 0 || seg.p0 * 3 + 2 >= pts.length || seg.p1 * 3 + 2 >= pts.length) continue;
             int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
             float sx = pts[p1] - pts[p0], sy = pts[p1 + 1] - pts[p0 + 1], sz = pts[p1 + 2] - pts[p0 + 2];
             float slen = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
@@ -1773,6 +1864,7 @@ class AnariLineHelper {
         int vIdx = 0, iIdx = 0;
 
         for (LineSegmentDef seg : segments) {
+            if (seg.p0 < 0 || seg.p1 < 0 || seg.p0 * 3 + 2 >= pts.length || seg.p1 * 3 + 2 >= pts.length) continue;
             int p0 = seg.p0 * 3, p1 = seg.p1 * 3;
             float ax = pts[p0], ay = pts[p0 + 1], az = pts[p0 + 2];
             float bx = pts[p1], by = pts[p1 + 1], bz = pts[p1 + 2];
@@ -1889,6 +1981,10 @@ class AnariLineHelper {
     }
 }
 
+// ============================================================================
+// LINESET IMPLEMENTATION
+// ============================================================================
+
 class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements AnariNode {
     private final org.web3d.x3d.jsail.Rendering.LineSet delegate;
 
@@ -1903,6 +1999,8 @@ class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements Anar
     public void renderLines(AnariContext ctx, float[] m, Object mat, Object app) {
         try {
             Object ls = (delegate != null) ? delegate : this;
+            ls = ctx.resolveUse(ls);
+
             Object colorNode = null;
             for (String method : List.of("getColor", "getColorList")) {
                 try { colorNode = ctx.resolveUse(ls.getClass().getMethod(method).invoke(ls)); if (colorNode != null) break; } catch (Exception ignored) {}
@@ -1953,8 +2051,11 @@ class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements Anar
             List<AnariLineHelper.LineSegmentDef> segments = new ArrayList<>();
             if (vc == null || vc.length == 0) {
                 for (int i = 0; i < nverts - 1; i++) {
-                    float[] c0 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i, colorStride, ctx) : (hasColor ? AnariLineHelper.getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
+                    float[] c0 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i, colorStride, ctx)
+                            : (hasColor ? AnariLineHelper.getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
                     float[] c1 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i + 1, colorStride, ctx) : c0;
+                    if (c0 == null) c0 = defaultLineCol;
+                    if (c1 == null) c1 = defaultLineCol;
                     segments.add(new AnariLineHelper.LineSegmentDef(i, i + 1, c0, c1));
                 }
             } else {
@@ -1975,6 +2076,8 @@ class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements Anar
                                     c1 = c0;
                                 }
                             }
+                            if (c0 == null) c0 = defaultLineCol;
+                            if (c1 == null) c1 = defaultLineCol;
                             segments.add(new AnariLineHelper.LineSegmentDef(p0, p1, c0, c1));
                         }
                     }
@@ -1990,6 +2093,10 @@ class AnariLineSet extends org.web3d.x3d.jsail.Rendering.LineSet implements Anar
     }
 }
 
+// ============================================================================
+// INDEXEDLINESET IMPLEMENTATION
+// ============================================================================
+
 class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet implements AnariNode {
     private final org.web3d.x3d.jsail.Rendering.IndexedLineSet delegate;
 
@@ -2001,13 +2108,11 @@ class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet i
         renderLines(ctx, parentTransform, null, null);
     }
 
-    public void renderLines(AnariContext ctx, float[] m, Object mat) {
-        renderLines(ctx, m, mat, null);
-    }
-
     public void renderLines(AnariContext ctx, float[] m, Object mat, Object app) {
         try {
             Object ils = (delegate != null) ? delegate : this;
+            ils = ctx.resolveUse(ils);
+
             Object colorNode = null;
             for (String method : List.of("getColor", "getColorList")) {
                 try { colorNode = ctx.resolveUse(ils.getClass().getMethod(method).invoke(ils)); if (colorNode != null) break; } catch (Exception ignored) {}
@@ -2028,6 +2133,8 @@ class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet i
             int nverts = pts.length / 3;
 
             int[] ci = X3DTypeAdapter.asIntArray(ils, "getCoordIndex");
+            if (ci == null || ci.length < 2) return;
+
             int[] colorIndex = X3DTypeAdapter.asIntArray(ils, "getColorIndex");
             boolean colorPerVertex = X3DTypeAdapter.asBoolean(ils, "getColorPerVertex", true);
 
@@ -2057,47 +2164,62 @@ class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet i
             }
 
             List<AnariLineHelper.LineSegmentDef> segments = new ArrayList<>();
-            if (ci == null || ci.length == 0) {
-                for (int i = 0; i < nverts - 1; i++) {
-                    float[] c0 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i, colorStride, ctx) : (hasColor ? AnariLineHelper.getColorAt(colors, 0, colorStride, ctx) : defaultLineCol);
-                    float[] c1 = (hasColor && colorPerVertex) ? AnariLineHelper.getColorAt(colors, i + 1, colorStride, ctx) : c0;
-                    segments.add(new AnariLineHelper.LineSegmentDef(i, i + 1, c0, c1));
+            int polylineIdx = 0;
+            int prevCoord = -1;
+            int prevColorIdx = -1;
+
+            for (int i = 0; i < ci.length; i++) {
+                int cIdx = ci[i];
+                if (cIdx < 0) {
+                    prevCoord = -1;
+                    prevColorIdx = -1;
+                    polylineIdx++;
+                    continue;
                 }
-            } else {
-                int prevCoord = -1, prevColorIdx = -1, currentPolyline = 0;
-                int segCount = 0;
-                for (int i = 0; i < ci.length; i++) {
-                    int coordIdx = ci[i];
-                    int colIdx = (colorIndex != null && i < colorIndex.length) ? colorIndex[i] : coordIdx;
-                    if (coordIdx < 0) {
-                        if (prevCoord != -1) currentPolyline++;
-                        prevCoord = -1;
-                        prevColorIdx = -1;
-                    } else {
-                        if (prevCoord >= 0 && prevCoord < nverts && coordIdx < nverts && prevCoord != coordIdx) {
-                            float[] c0 = defaultLineCol, c1 = defaultLineCol;
-                            if (hasColor) {
-                                int numColors = colors.length / colorStride;
-                                if (colorIndex == null && numColors < nverts) {
-                                    c0 = AnariLineHelper.getColorAt(colors, segCount % numColors, colorStride, ctx);
-                                    c1 = c0;
-                                } else if (colorPerVertex) {
-                                    c0 = AnariLineHelper.getColorAt(colors, prevColorIdx, colorStride, ctx);
-                                    c1 = AnariLineHelper.getColorAt(colors, colIdx, colorStride, ctx);
-                                } else {
-                                    int pCol = (colorIndex != null && currentPolyline < colorIndex.length) ? colorIndex[currentPolyline] : currentPolyline;
-                                    c0 = AnariLineHelper.getColorAt(colors, pCol, colorStride, ctx);
-                                    c1 = c0;
-                                }
-                            }
-                            segments.add(new AnariLineHelper.LineSegmentDef(prevCoord, coordIdx, c0, c1));
-                            segCount++;
+                if (cIdx >= nverts) {
+                    prevCoord = -1;
+                    prevColorIdx = -1;
+                    continue;
+                }
+
+                int curColorIdx = -1;
+                if (hasColor) {
+                    if (colorPerVertex) {
+                        if (colorIndex != null && i < colorIndex.length && colorIndex[i] >= 0) {
+                            curColorIdx = colorIndex[i];
+                        } else {
+                            curColorIdx = cIdx;
                         }
-                        prevCoord = coordIdx;
-                        prevColorIdx = colIdx;
+                    } else {
+                        if (colorIndex != null && polylineIdx < colorIndex.length && colorIndex[polylineIdx] >= 0) {
+                            curColorIdx = colorIndex[polylineIdx];
+                        } else {
+                            curColorIdx = polylineIdx;
+                        }
                     }
                 }
+
+                if (prevCoord >= 0) {
+                    float[] c0 = defaultLineCol;
+                    float[] c1 = defaultLineCol;
+                    if (hasColor) {
+                        if (colorPerVertex) {
+                            c0 = AnariLineHelper.getColorAt(colors, prevColorIdx, colorStride, ctx);
+                            c1 = AnariLineHelper.getColorAt(colors, curColorIdx, colorStride, ctx);
+                        } else {
+                            c0 = AnariLineHelper.getColorAt(colors, curColorIdx, colorStride, ctx);
+                            c1 = c0;
+                        }
+                        if (c0 == null) c0 = defaultLineCol;
+                        if (c1 == null) c1 = defaultLineCol;
+                    }
+                    segments.add(new AnariLineHelper.LineSegmentDef(prevCoord, cIdx, c0, c1));
+                }
+
+                prevCoord = cIdx;
+                prevColorIdx = curColorIdx;
             }
+
             if (segments.isEmpty()) return;
 
             AnariLineHelper.renderSegments(ctx, pts, segments, m, defaultLineCol, lineWidthScale);
@@ -3087,6 +3209,7 @@ class AnariSphere extends org.web3d.x3d.jsail.Geometry3D.Sphere implements Anari
     @Override
     public Geometry.Triangle buildGeometry(AnariContext ctx, float[] m, Map<String, Object> protoArgs) throws Throwable {
         float radius = (delegate != null) ? delegate.getRadius() : getRadius();
+        if (radius <= 0f) radius = 1.0f;
 
         int rings = 20, sectors = 32;
         int nverts = (rings + 1) * (sectors + 1);
@@ -3131,6 +3254,7 @@ class AnariSphere extends org.web3d.x3d.jsail.Geometry3D.Sphere implements Anari
                 indices[iIdx++] = first;
                 indices[iIdx++] = second;
                 indices[iIdx++] = first + 1;
+
                 indices[iIdx++] = second;
                 indices[iIdx++] = second + 1;
                 indices[iIdx++] = first + 1;
@@ -3473,14 +3597,17 @@ class AnariNodeFactory {
 
         try {
             String def = (String) node.getClass().getMethod("getDEF").invoke(node);
-            if (def != null && !def.trim().isEmpty()) ctx.defMap.putIfAbsent(def.trim(), node);
+            if (def != null && !def.trim().isEmpty()) ctx.defMap.putIfAbsent(X3DTypeAdapter.cleanQuotes(def), node);
         } catch (Exception ignored) {}
 
         try {
             String use = (String) node.getClass().getMethod("getUSE").invoke(node);
-            if (use != null && !use.isEmpty() && ctx.defMap.containsKey(use)) {
-                processNode(ctx, ctx.defMap.get(use), parentTransform, protoArgs);
-                return;
+            if (use != null && !use.isEmpty()) {
+                String cleanUse = X3DTypeAdapter.cleanQuotes(use);
+                if (ctx.defMap.containsKey(cleanUse)) {
+                    processNode(ctx, ctx.defMap.get(cleanUse), parentTransform, protoArgs);
+                    return;
+                }
             }
         } catch (Exception ignored) {}
 
@@ -3510,63 +3637,68 @@ class AnariNodeFactory {
         if (cName.contains("ProtoInstance")) {
             try {
                 String name = X3DTypeAdapter.asString(node, "getName");
+                if (name != null) name = X3DTypeAdapter.cleanQuotes(name);
                 Object protoDecl = ctx.protoMap.get(name);
                 if (protoDecl != null) {
                     Map<String, Object> newArgs = new HashMap<>();
 
-                    try {
-                        Object pInterface = protoDecl.getClass().getMethod("getProtoInterface").invoke(protoDecl);
-                        if (pInterface != null) {
-                            List<?> fields = (List<?>) pInterface.getClass().getMethod("getFieldList").invoke(pInterface);
-                            if (fields != null) {
-                                for (Object f : fields) {
-                                    String fName = X3DTypeAdapter.asString(f, "getName");
-                                    if (fName != null && !newArgs.containsKey(fName)) {
-                                        Object defVal = X3DTypeAdapter.extractFieldValue(f);
-                                        if (defVal != null) newArgs.put(fName, defVal);
-                                    }
+                    // 1. Defaults from ProtoInterface
+                    Object pInterface = null;
+                    for (String m : List.of("getProtoInterface", "getInterface")) {
+                        try { pInterface = protoDecl.getClass().getMethod(m).invoke(protoDecl); if (pInterface != null) break; } catch (Exception ignored) {}
+                    }
+                    if (pInterface != null) {
+                        List<?> fields = X3DTypeAdapter.getListFromNode(pInterface, "getField", "getFieldList", "getFields");
+                        for (Object f : fields) {
+                            String fName = X3DTypeAdapter.asString(f, "getName");
+                            if (fName != null) {
+                                fName = X3DTypeAdapter.cleanQuotes(fName);
+                                if (!newArgs.containsKey(fName)) {
+                                    Object defVal = X3DTypeAdapter.extractFieldValue(f);
+                                    if (defVal != null) newArgs.put(fName, defVal);
                                 }
                             }
                         }
-                    } catch (Exception ignored) {}
+                    }
 
+                    // 2. IS / connect
                     Object isNode = null;
-                    try { isNode = node.getClass().getMethod("getIS").invoke(node); } catch (Exception ignored) {}
+                    for (String m : List.of("getIS", "getIs")) {
+                        try { isNode = node.getClass().getMethod(m).invoke(node); if (isNode != null) break; } catch (Exception ignored) {}
+                    }
                     if (isNode != null) {
-                        List<?> connects = null;
-                        for (String m : List.of("getConnectList", "getConnects")) {
-                            try {
-                                Object res = isNode.getClass().getMethod(m).invoke(isNode);
-                                if (res instanceof List<?>) { connects = (List<?>) res; break; }
-                            } catch (Exception ignored) {}
-                        }
-                        if (connects != null) {
-                            for (Object c : connects) {
-                                String nField = X3DTypeAdapter.asString(c, "getNodeField");
-                                String pField = X3DTypeAdapter.asString(c, "getProtoField");
-                                if (protoArgs.containsKey(pField)) newArgs.put(nField, protoArgs.get(pField));
+                        List<?> connects = X3DTypeAdapter.getListFromNode(isNode, "getConnect", "getConnectList", "getConnects");
+                        for (Object c : connects) {
+                            String nField = X3DTypeAdapter.asString(c, "getNodeField");
+                            String pField = X3DTypeAdapter.asString(c, "getProtoField");
+                            if (nField != null) nField = X3DTypeAdapter.cleanQuotes(nField);
+                            if (pField != null) pField = X3DTypeAdapter.cleanQuotes(pField);
+                            if (pField != null && protoArgs.containsKey(pField)) {
+                                newArgs.put(nField, protoArgs.get(pField));
                             }
                         }
                     }
 
-                    List<?> fvList = null;
-                    for (String m : List.of("getFieldValueList", "getFieldValues", "getFieldList")) {
-                        try {
-                            Object res = node.getClass().getMethod(m).invoke(node);
-                            if (res instanceof List<?>) { fvList = (List<?>) res; break; }
-                        } catch (Exception ignored) {}
-                    }
-                    if (fvList != null) {
-                        for (Object fv : fvList) {
-                            String fName = X3DTypeAdapter.asString(fv, "getName");
+                    // 3. FieldValue overrides on this ProtoInstance
+                    List<?> fvList = X3DTypeAdapter.getListFromNode(node, "getFieldValue", "getFieldValueList", "getFieldValues", "getFieldList");
+                    for (Object fv : fvList) {
+                        String fName = X3DTypeAdapter.asString(fv, "getName");
+                        if (fName != null) {
+                            fName = X3DTypeAdapter.cleanQuotes(fName);
                             Object fVal = X3DTypeAdapter.extractFieldValue(fv);
                             if (fVal != null) newArgs.put(fName, fVal);
                         }
                     }
 
-                    Object pBody = protoDecl.getClass().getMethod("getProtoBody").invoke(protoDecl);
-                    Object bodyChildren = pBody.getClass().getMethod("getChildren").invoke(pBody);
-                    traverseList(ctx, bodyChildren, parentTransform, newArgs);
+                    // 4. Traverse ProtoBody
+                    Object pBody = null;
+                    for (String m : List.of("getProtoBody", "getBody")) {
+                        try { pBody = protoDecl.getClass().getMethod(m).invoke(protoDecl); if (pBody != null) break; } catch (Exception ignored) {}
+                    }
+                    if (pBody != null) {
+                        List<?> bodyChildren = X3DTypeAdapter.getListFromNode(pBody, "getChildren", "getChildrenList", "getChildList");
+                        traverseList(ctx, bodyChildren, parentTransform, newArgs);
+                    }
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -3640,6 +3772,12 @@ class AnariNodeFactory {
         if (x3dGeom.getClass().getSimpleName().equals("IndexedTriangleSet")) {
             return new AnariIndexedTriangleSet(x3dGeom);
         }
+        if (x3dGeom instanceof org.web3d.x3d.jsail.NURBS.NurbsPatchSurface) {
+            return new AnariNurbsPatchSurface((org.web3d.x3d.jsail.NURBS.NurbsPatchSurface) x3dGeom);
+        }
+        if (x3dGeom.getClass().getSimpleName().contains("NurbsPatchSurface")) {
+            return new AnariNurbsPatchSurface(x3dGeom);
+        }
         if (x3dGeom instanceof org.web3d.x3d.jsail.Geometry3D.Box) {
             return new AnariBox((org.web3d.x3d.jsail.Geometry3D.Box) x3dGeom);
         }
@@ -3672,6 +3810,15 @@ class AnariNodeFactory {
         }
         return new AnariIndexedLineSet();
     }
+
+    public static AnariLineSet adaptRegularLineSet(Object x3dGeom) {
+        x3dGeom = X3DTypeAdapter.unwrapNode(x3dGeom);
+        if (x3dGeom instanceof AnariLineSet) return (AnariLineSet) x3dGeom;
+        if (x3dGeom instanceof org.web3d.x3d.jsail.Rendering.LineSet) {
+            return new AnariLineSet((org.web3d.x3d.jsail.Rendering.LineSet) x3dGeom);
+        }
+        return new AnariLineSet();
+    }
 }
 
 // ============================================================================
@@ -3699,8 +3846,8 @@ class X3DAnariHandler extends AbstractHandler {
     private float lastAz = Float.NaN, lastEl = Float.NaN;
     private boolean built = false;
 
-    private static final float HEADLIGHT_IRRADIANCE = 1.0f;
-    private static final float AMBIENT_RADIANCE = 0.35f;
+    private static final float HEADLIGHT_IRRADIANCE = 1.2f;
+    private static final float AMBIENT_RADIANCE = 0.45f;
 
     private long animStartTime = 0;
     private final List<X3DRoute> routes = new ArrayList<>();
@@ -3896,10 +4043,12 @@ class X3DAnariHandler extends AbstractHandler {
 
         float[] identity = { 1,0,0,0, 0,(AnariContext.FLIP_Y ? -1 : 1),0,0, 0,0,1,0, 0,0,0,1 };
         Object scene = null;
-        try { scene = x3dModel.getClass().getMethod("getScene").invoke(x3dModel); } catch (Exception ignored) {}
+        for (String m : List.of("getScene")) {
+            try { scene = x3dModel.getClass().getMethod(m).invoke(x3dModel); if (scene != null) break; } catch (Exception ignored) {}
+        }
         if (scene != null) {
-            AnariNodeFactory.traverseList(context, scene.getClass().getMethod("getChildren").invoke(scene),
-                                         identity, new HashMap<>());
+            List<?> sceneChildren = X3DTypeAdapter.getListFromNode(scene, "getChildren", "getChildrenList", "getChildList");
+            AnariNodeFactory.traverseList(context, sceneChildren, identity, new HashMap<>());
         }
 
         if (context.bmin[0] <= context.bmax[0]) {
@@ -3920,8 +4069,9 @@ class X3DAnariHandler extends AbstractHandler {
         }
 
         angleScale = Math.abs(cameraElevation) > 1.6f ? (float) (Math.PI / 180.0) : 1f;
-        cameraAzimuth = 0f;
-        cameraElevation = 0f;
+        // Set an isometric-like perspective angle so the 3D cube structure is immediately visible
+        cameraAzimuth = 0.45f;
+        cameraElevation = 0.30f;
 
         if (renderer != null) {
             try {
@@ -3933,7 +4083,7 @@ class X3DAnariHandler extends AbstractHandler {
             } catch (Throwable t) { t.printStackTrace(); }
         }
 
-        headlight = device.newLight(Light.SubType.DIRECTIONAL).setDirection(0f, 0f, -1f);
+        headlight = device.newLight(Light.SubType.DIRECTIONAL).setDirection(-0.4f, -0.6f, -0.7f);
         headlight.setIrradiance(HEADLIGHT_IRRADIANCE);
         headlight.commit();
         keepAlive.add(headlight);
@@ -3942,8 +4092,8 @@ class X3DAnariHandler extends AbstractHandler {
         allLights.add(headlight);
 
         try {
-            fillLight = device.newLight(Light.SubType.DIRECTIONAL).setDirection(0.3f, 0.5f, 1f);
-            fillLight.setIrradiance(0.45f);
+            fillLight = device.newLight(Light.SubType.DIRECTIONAL).setDirection(0.5f, 0.7f, 0.5f);
+            fillLight.setIrradiance(0.6f);
             fillLight.commit();
             keepAlive.add(fillLight);
             allLights.add(fillLight);
@@ -3969,8 +4119,7 @@ class X3DAnariHandler extends AbstractHandler {
 
         String def = X3DTypeAdapter.asString(node, "getDEF");
         if (def != null && !def.trim().isEmpty()) {
-            def = def.replace("\"", "").trim();
-            defMap.put(def, node);
+            defMap.put(X3DTypeAdapter.cleanQuotes(def), node);
         }
 
         String cName = node.getClass().getSimpleName();
@@ -3984,7 +4133,10 @@ class X3DAnariHandler extends AbstractHandler {
 
         if (cName.contains("ProtoDeclare")) {
             String name = X3DTypeAdapter.asString(node, "getName");
-            if (name != null && !name.trim().isEmpty()) protoMap.put(name.trim(), node);
+            if (name != null && !name.trim().isEmpty()) {
+                String clean = X3DTypeAdapter.cleanQuotes(name);
+                protoMap.put(clean, node);
+            }
         }
 
         if (cName.contains("TimeSensor") && def != null) {
@@ -4063,10 +4215,10 @@ class X3DAnariHandler extends AbstractHandler {
             String tNode = X3DTypeAdapter.asString(node, "getToNode");
             String tField = X3DTypeAdapter.asString(node, "getToField");
             if (fNode != null && tNode != null) {
-                routes.add(new X3DRoute(fNode.replace("\"", "").trim(),
-                                       fField.replace("\"", "").trim(),
-                                       tNode.replace("\"", "").trim(),
-                                       tField.replace("\"", "").trim()));
+                routes.add(new X3DRoute(X3DTypeAdapter.cleanQuotes(fNode),
+                                       X3DTypeAdapter.cleanQuotes(fField),
+                                       X3DTypeAdapter.cleanQuotes(tNode),
+                                       X3DTypeAdapter.cleanQuotes(tField)));
             }
         }
 
@@ -4075,10 +4227,12 @@ class X3DAnariHandler extends AbstractHandler {
             return;
         }
 
-        for (String m : List.of("getChildren", "getRoutes", "getRouteList", "getAppearance", "getGeometry", "getMaterial", "getTexture", "getTextureTransform",
+        for (String m : List.of("getChildren", "getChildrenList", "getChildList", "getProtoDeclare", "getProtoDeclareList", "getProtos",
+                                "getRoutes", "getRouteList", "getAppearance", "getGeometry", "getMaterial", "getTexture", "getTextureTransform",
                                 "getSkeleton", "getSkeletonList", "getSkin", "getSkinList",
                                 "getJoints", "getSegments", "getSites", "getDisplacers", "getDisplacerList",
-                                "getProtoBody", "getProtoDeclareList", "getProtoInterface", "getFieldList", "getFieldValueList")) {
+                                "getControlPoint", "getControlPointList",
+                                "getProtoBody", "getProtoInterface", "getField", "getFieldList", "getFieldValue", "getFieldValueList")) {
             tryInvokeAndCache(node, m);
         }
     }
