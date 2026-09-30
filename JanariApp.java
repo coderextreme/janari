@@ -166,7 +166,6 @@ class X3DAnariHandler extends AbstractHandler {
     private static final float AMBIENT_RADIANCE = 0.25f;
     private Light.Directional headlight;
 
-    // Compensates for JavaFX image display in AnariPane
     private static final boolean FLIP_Y = true;
     private static final boolean SWAP_RED_BLUE = true;
     private static final boolean SRGB_ENCODE_COLORS = true;
@@ -640,7 +639,6 @@ class X3DAnariHandler extends AbstractHandler {
             return;
         }
 
-        // --- ProtoInstance Execution ---
         if (cName.contains("ProtoInstance")) {
             try {
                 String name = extractString(node, "getName");
@@ -648,7 +646,6 @@ class X3DAnariHandler extends AbstractHandler {
                 if (protoDecl != null) {
                     Map<String, Object> newArgs = new HashMap<>();
 
-                    // 1. Defaults from ProtoInterface
                     Object protoInterface = null;
                     try { protoInterface = protoDecl.getClass().getMethod("getProtoInterface").invoke(protoDecl); } catch (Exception ignored) {}
                     if (protoInterface != null) {
@@ -665,7 +662,6 @@ class X3DAnariHandler extends AbstractHandler {
                         } catch (Exception ignored) {}
                     }
 
-                    // 2. IS connects from parent proto scope
                     Object isNode = null;
                     try { isNode = node.getClass().getMethod("getIS").invoke(node); } catch (Exception ignored) {}
                     if (isNode != null) {
@@ -681,7 +677,6 @@ class X3DAnariHandler extends AbstractHandler {
                         } catch (Exception ignored) {}
                     }
 
-                    // 3. Overrides from fieldValueList on this ProtoInstance
                     try {
                         List<?> fvList = (List<?>) node.getClass().getMethod("getFieldValueList").invoke(node);
                         for (Object fv : fvList) {
@@ -694,7 +689,6 @@ class X3DAnariHandler extends AbstractHandler {
                         }
                     } catch (Exception ignored) {}
 
-                    // 4. Instantiate ProtoBody
                     Object pBody = protoDecl.getClass().getMethod("getProtoBody").invoke(protoDecl);
                     Object bodyChildren = pBody.getClass().getMethod("getChildren").invoke(pBody);
                     traverseList(device, bodyChildren, parentTransform, newArgs);
@@ -911,7 +905,6 @@ class X3DAnariHandler extends AbstractHandler {
                                          Object anariObj) {
         if (target == null || anariObj == null) return;
 
-        // 1. Try public typed method
         for (Method m : target.getClass().getMethods()) {
             if (m.getParameterCount() == 1) {
                 String mName = m.getName().toLowerCase();
@@ -928,7 +921,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // 2. Try generic set(String, Object)
         for (Method m : target.getClass().getMethods()) {
             if (m.getName().equals("set") && m.getParameterCount() == 2) {
                 if (m.getParameterTypes()[0] == String.class && m.getParameterTypes()[1].isInstance(anariObj)) {
@@ -940,7 +932,6 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
-        // 3. Try low-level set(String, DataType, MemorySegment)
         MemorySegment h = getAnariHandle(anariObj);
         if (h != null) {
             MemorySegment ptr = sceneArena.allocateFrom(ValueLayout.ADDRESS, h);
@@ -1118,7 +1109,6 @@ class X3DAnariHandler extends AbstractHandler {
             int width = img.getWidth(), height = img.getHeight();
             byte[] rgba = new byte[width * height * 4];
             int k = 0;
-            // Rows read bottom-to-top so (u, v)=(0, 0) starts at the bottom-left matching X3D
             for (int y = height - 1; y >= 0; y--) {
                 for (int x = 0; x < width; x++) {
                     int argb = img.getRGB(x, y);
@@ -1127,7 +1117,6 @@ class X3DAnariHandler extends AbstractHandler {
                     byte b = (byte) (argb         & 0xFF);
                     byte a = (byte) ((argb >> 24) & 0xFF);
 
-                    // Pre-swap Red and Blue so AnariPane's frame display outputs correct colors
                     if (SWAP_RED_BLUE) {
                         rgba[k++] = b;
                         rgba[k++] = g;
@@ -1600,15 +1589,26 @@ class X3DAnariHandler extends AbstractHandler {
         float[] uvs = (tcNode != null) ? extractFloatArray(tcNode, "getPoint") : null;
         boolean hasUV = (uvs != null && uvs.length >= 2);
 
+        float creaseAngle = (float) extractDouble(ifs, "getCreaseAngle", 0.0);
+
         List<int[]> tris = new ArrayList<>();
         List<int[]> uvTris = hasUV ? new ArrayList<>() : null;
+        List<Integer> triFaceId = new ArrayList<>();
+        List<float[]> faceNormals = new ArrayList<>();
+        List<Integer>[] vertFaces = new List[nverts];
+        for (int i = 0; i < nverts; i++) vertFaces[i] = new ArrayList<>();
+
         List<Integer> faceCoord = new ArrayList<>();
         List<Integer> faceUV = hasUV ? new ArrayList<>() : null;
 
+        int currentFaceId = 0;
         for (int i = 0; i < ci.length; i++) {
             int idx = ci[i];
             if (idx < 0) {
-                triangulatePolygon(pts, faceCoord, faceUV, tris, uvTris);
+                if (faceCoord.size() >= 3) {
+                    processFace(pts, faceCoord, faceUV, currentFaceId, tris, uvTris, triFaceId, faceNormals, vertFaces);
+                    currentFaceId++;
+                }
                 faceCoord.clear();
                 if (faceUV != null) faceUV.clear();
             } else if (idx < nverts) {
@@ -1619,7 +1619,9 @@ class X3DAnariHandler extends AbstractHandler {
                 }
             }
         }
-        if (!faceCoord.isEmpty()) triangulatePolygon(pts, faceCoord, faceUV, tris, uvTris);
+        if (faceCoord.size() >= 3) {
+            processFace(pts, faceCoord, faceUV, currentFaceId, tris, uvTris, triFaceId, faceNormals, vertFaces);
+        }
         if (tris.isEmpty()) return null;
 
         int totalTris = tris.size();
@@ -1656,10 +1658,14 @@ class X3DAnariHandler extends AbstractHandler {
             }
         }
 
+        // --- Generate Normals based on creaseAngle ---
+        float[] unrolledNormals = computeSmoothNormals(pts, tris, triFaceId, faceNormals, vertFaces, creaseAngle, unrolledToOrigCoord);
+
         MemorySegment vSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledPts);
         Array1D vArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.FLOAT32_VEC3, totalVerts);
         vArray.commit();
+
         MemorySegment iSeg = sceneArena.allocateFrom(ValueLayout.JAVA_INT, indices);
         Array1D iArray = device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
                                            DataType.UINT32_VEC3, totalTris);
@@ -1668,6 +1674,13 @@ class X3DAnariHandler extends AbstractHandler {
         Geometry.Triangle geom = device.newGeometry(Geometry.SubType.TRIANGLE)
                 .setVertexPosition(vArray)
                 .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledNormals);
+        Array1D nArray = device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                           DataType.FLOAT32_VEC3, totalVerts);
+        nArray.commit();
+        setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+        keepAlive.add(nArray);
 
         if (hasUV && unrolledUV != null) {
             MemorySegment uvSeg = sceneArena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledUV);
@@ -1691,16 +1704,90 @@ class X3DAnariHandler extends AbstractHandler {
                 if (o instanceof DisplacerAnim) {
                     DisplacerAnim da = (DisplacerAnim) o;
                     if (da.displacements != null && da.displacements.length > 0) {
-                        DisplacerMeshBinding binding = new DisplacerMeshBinding(da, geom, vArray, vSeg, pts, unrolledToOrigCoord);
+                        DisplacerMeshBinding binding = new DisplacerMeshBinding(
+                            da, geom, vArray, vSeg, nArray, nSeg, pts,
+                            unrolledToOrigCoord, tris, triFaceId, vertFaces, creaseAngle
+                        );
                         activeBindings.add(binding);
-                        System.out.printf("Bound animated displacer '%s' (%d deltas) to mesh (%d vertices)%n",
-                                          da.def, da.coordIndex.length, totalVerts);
+                        System.out.printf("Bound animated displacer '%s' (%d deltas) to mesh (%d vertices, creaseAngle=%.2f)%n",
+                                          da.def, da.coordIndex.length, totalVerts, creaseAngle);
                     }
                 }
             }
         }
 
         return geom;
+    }
+
+    private static void processFace(float[] pts, List<Integer> faceCoord, List<Integer> faceUV,
+                                   int faceId, List<int[]> tris, List<int[]> uvTris,
+                                   List<Integer> triFaceId, List<float[]> faceNormals,
+                                   List<Integer>[] vertFaces) {
+        float[] fn = new float[3];
+        int nPts = faceCoord.size();
+        for (int i = 0; i < nPts; i++) {
+            int a = faceCoord.get(i) * 3;
+            int b = faceCoord.get((i + 1) % nPts) * 3;
+            fn[0] += (pts[a + 1] - pts[b + 1]) * (pts[a + 2] + pts[b + 2]);
+            fn[1] += (pts[a + 2] - pts[b + 2]) * (pts[a]     + pts[b]);
+            fn[2] += (pts[a]     - pts[b])     * (pts[a + 1] + pts[b + 1]);
+            vertFaces[faceCoord.get(i)].add(faceId);
+        }
+        normalize(fn);
+        faceNormals.add(fn);
+
+        int startTris = tris.size();
+        triangulatePolygon(pts, faceCoord, faceUV, tris, uvTris);
+        for (int k = startTris; k < tris.size(); k++) {
+            triFaceId.add(faceId);
+        }
+    }
+
+    private static float[] computeSmoothNormals(float[] pts, List<int[]> tris, List<Integer> triFaceId,
+                                                List<float[]> faceNormals, List<Integer>[] vertFaces,
+                                                float creaseAngle, int[] unrolledToOrigCoord) {
+        int totalVerts = unrolledToOrigCoord.length;
+        float[] unrolledNormals = new float[totalVerts * 3];
+        float cosCrease = (float) Math.cos(Math.max(0.0, Math.min(Math.PI, creaseAngle)));
+
+        int totalTris = tris.size();
+        for (int t = 0; t < totalTris; t++) {
+            int fId = triFaceId.get(t);
+            float[] fn = faceNormals.get(fId);
+
+            for (int corner = 0; corner < 3; corner++) {
+                int vertIdx = t * 3 + corner;
+                int cIdx = unrolledToOrigCoord[vertIdx];
+
+                if (creaseAngle <= 1e-4f) {
+                    unrolledNormals[vertIdx * 3]     = fn[0];
+                    unrolledNormals[vertIdx * 3 + 1] = fn[1];
+                    unrolledNormals[vertIdx * 3 + 2] = fn[2];
+                } else {
+                    float sx = 0f, sy = 0f, sz = 0f;
+                    List<Integer> adjFaces = vertFaces[cIdx];
+                    for (int otherFaceId : adjFaces) {
+                        float[] otherFn = faceNormals.get(otherFaceId);
+                        float dot = fn[0] * otherFn[0] + fn[1] * otherFn[1] + fn[2] * otherFn[2];
+                        if (dot >= cosCrease) {
+                            sx += otherFn[0];
+                            sy += otherFn[1];
+                            sz += otherFn[2];
+                        }
+                    }
+                    float len = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
+                    if (len > 1e-6f) {
+                        sx /= len; sy /= len; sz /= len;
+                    } else {
+                        sx = fn[0]; sy = fn[1]; sz = fn[2];
+                    }
+                    unrolledNormals[vertIdx * 3]     = sx;
+                    unrolledNormals[vertIdx * 3 + 1] = sy;
+                    unrolledNormals[vertIdx * 3 + 2] = sz;
+                }
+            }
+        }
+        return unrolledNormals;
     }
 
     private static void triangulatePolygon(float[] pts, List<Integer> faceCoord, List<Integer> faceUV,
@@ -1886,18 +1973,32 @@ class X3DAnariHandler extends AbstractHandler {
         final Geometry.Triangle geometry;
         Array1D vArray;
         final MemorySegment vSeg;
+        Array1D nArray;
+        final MemorySegment nSeg;
         final float[] baseCoords;
         final int[] unrolledToOrig;
+        final List<int[]> tris;
+        final List<Integer> triFaceId;
+        final List<Integer>[] vertFaces;
+        final float creaseAngle;
         float lastWeight = Float.NaN;
 
         DisplacerMeshBinding(DisplacerAnim displacer, Geometry.Triangle geometry, Array1D vArray,
-                             MemorySegment vSeg, float[] baseCoords, int[] unrolledToOrig) {
+                             MemorySegment vSeg, Array1D nArray, MemorySegment nSeg, float[] baseCoords,
+                             int[] unrolledToOrig, List<int[]> tris, List<Integer> triFaceId,
+                             List<Integer>[] vertFaces, float creaseAngle) {
             this.displacer = displacer;
             this.geometry = geometry;
             this.vArray = vArray;
             this.vSeg = vSeg;
+            this.nArray = nArray;
+            this.nSeg = nSeg;
             this.baseCoords = baseCoords.clone();
             this.unrolledToOrig = unrolledToOrig;
+            this.tris = tris;
+            this.triFaceId = triFaceId;
+            this.vertFaces = vertFaces;
+            this.creaseAngle = creaseAngle;
         }
 
         void apply(Device device, Arena arena, float weight) {
@@ -1920,13 +2021,52 @@ class X3DAnariHandler extends AbstractHandler {
                 vSeg.set(ValueLayout.JAVA_FLOAT, offset + 2 * Float.BYTES, deformed[cIdx * 3 + 2]);
             }
 
+            // Recompute smooth face and vertex normals for deformed mesh
+            int maxFaceId = 0;
+            for (int fid : triFaceId) if (fid > maxFaceId) maxFaceId = fid;
+            List<float[]> deformedFaceNormals = new ArrayList<>(maxFaceId + 1);
+            for (int i = 0; i <= maxFaceId; i++) deformedFaceNormals.add(new float[3]);
+
+            for (int t = 0; t < tris.size(); t++) {
+                int fId = triFaceId.get(t);
+                int[] cTri = tris.get(t);
+                int a = cTri[0] * 3, b = cTri[1] * 3, c = cTri[2] * 3;
+                float abx = deformed[b] - deformed[a], aby = deformed[b + 1] - deformed[a + 1], abz = deformed[b + 2] - deformed[a + 2];
+                float acx = deformed[c] - deformed[a], acy = deformed[c + 1] - deformed[a + 1], acz = deformed[c + 2] - deformed[a + 2];
+                float[] fn = deformedFaceNormals.get(fId);
+                fn[0] += (aby * acz - abz * acy);
+                fn[1] += (abz * acx - abx * acz);
+                fn[2] += (abx * acy - aby * acx);
+            }
+            for (float[] fn : deformedFaceNormals) normalize(fn);
+
+            float[] deformedNormals = computeSmoothNormals(deformed, tris, triFaceId, deformedFaceNormals,
+                                                          vertFaces, creaseAngle, unrolledToOrig);
+            for (int v = 0; v < unrolledToOrig.length; v++) {
+                long offset = (long) v * 3 * Float.BYTES;
+                nSeg.set(ValueLayout.JAVA_FLOAT, offset,                  deformedNormals[v * 3]);
+                nSeg.set(ValueLayout.JAVA_FLOAT, offset + Float.BYTES,     deformedNormals[v * 3 + 1]);
+                nSeg.set(ValueLayout.JAVA_FLOAT, offset + 2 * Float.BYTES, deformedNormals[v * 3 + 2]);
+            }
+
             try {
                 Array1D freshArray = device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
                                                       DataType.FLOAT32_VEC3, unrolledToOrig.length);
-                geometry.setVertexPosition(freshArray);
                 freshArray.commit();
+                geometry.setVertexPosition(freshArray);
+
+                Array1D freshNormArray = device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL,
+                                                          DataType.FLOAT32_VEC3, unrolledToOrig.length);
+                freshNormArray.commit();
+                for (Method m : geometry.getClass().getMethods()) {
+                    if (m.getName().toLowerCase().contains("vertexnormal") && m.getParameterCount() == 1) {
+                        try { m.invoke(geometry, freshNormArray); break; } catch (Throwable ignored) {}
+                    }
+                }
+
                 geometry.commit();
                 vArray = freshArray;
+                nArray = freshNormArray;
             } catch (Throwable ignored) {}
         }
     }
