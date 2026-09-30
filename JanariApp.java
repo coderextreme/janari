@@ -2088,6 +2088,259 @@ class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet i
     }
 }
 
+class AnariIndexedTriangleSet implements AnariGeometry {
+    private final Object delegate;
+    private boolean hasColors = false;
+
+    public AnariIndexedTriangleSet(Object delegate) { this.delegate = delegate; }
+
+    @Override
+    public boolean hasVertexColors() { return hasColors; }
+
+    @Override
+    public Geometry.Triangle buildGeometry(AnariContext ctx, float[] m, Map<String, Object> protoArgs) throws Throwable {
+        Object its = X3DTypeAdapter.unwrapNode(delegate);
+        if (its == null) return null;
+
+        // IndexedTriangleSet differs from IndexedFaceSet in one important respect:
+        // index is already a flat list of triangle corners, with three indices per
+        // triangle and no -1 polygon separators.
+        int[] index = X3DTypeAdapter.asIntArray(its, "getIndex");
+
+        Object coord = null;
+        for (String method : List.of("getCoord", "getCoordList")) {
+            try {
+                coord = ctx.resolveUse(its.getClass().getMethod(method).invoke(its));
+                if (coord != null) break;
+            } catch (Exception ignored) {}
+        }
+        if (coord == null) coord = protoArgs.get("_skinCoord");
+
+        float[] pts = (coord == null) ? null : X3DTypeAdapter.asFloatArray(coord, "getPoint");
+        if (index == null || index.length < 3 || pts == null || pts.length < 9) return null;
+
+        final int nverts = pts.length / 3;
+
+        // X3D IndexedTriangleSet applies texture/color values in coordinate order;
+        // there are no texCoordIndex/colorIndex fields on this node.
+        Object tcNode = null;
+        for (String method : List.of("getTexCoord", "getTexCoordList")) {
+            try {
+                tcNode = ctx.resolveUse(its.getClass().getMethod(method).invoke(its));
+                if (tcNode != null) break;
+            } catch (Exception ignored) {}
+        }
+        float[] uvs = (tcNode != null) ? X3DTypeAdapter.asFloatArray(tcNode, "getPoint") : null;
+        boolean hasTexture = Boolean.TRUE.equals(protoArgs.get("_hasTexture"));
+        boolean hasUV = (uvs != null && uvs.length >= 2) || hasTexture;
+
+        Object colorNode = null;
+        for (String method : List.of("getColor", "getColorList")) {
+            try {
+                colorNode = ctx.resolveUse(its.getClass().getMethod(method).invoke(its));
+                if (colorNode != null) break;
+            } catch (Exception ignored) {}
+        }
+        float[] rawColors = (colorNode != null) ? X3DTypeAdapter.asFloatArray(colorNode, "getColor") : null;
+        if (rawColors == null && colorNode != null) rawColors = X3DTypeAdapter.asFloatArray(colorNode, "getPoint");
+        int colorStride = (colorNode != null && colorNode.getClass().getSimpleName().contains("RGBA")) ? 4 : 3;
+        boolean hasColorNode = rawColors != null && rawColors.length >= colorStride;
+        this.hasColors = hasColorNode;
+
+        // Build one ANARI vertex for each triangle corner.  This is intentional:
+        // it preserves the one-to-one X3D correspondence needed by UVs, colors,
+        // HAnim skinning and displacers without requiring ANARI indexed attribute
+        // streams with separate index sets.
+        List<int[]> tris = new ArrayList<>();
+        List<Integer> triFaceId = new ArrayList<>();
+        List<float[]> faceNormals = new ArrayList<>();
+        @SuppressWarnings("unchecked")
+        List<Integer>[] vertFaces = new List[nverts];
+        for (int i = 0; i < nverts; i++) vertFaces[i] = new ArrayList<>();
+
+        for (int i = 0; i + 2 < index.length; i += 3) {
+            int a = index[i], b = index[i + 1], c = index[i + 2];
+            if (a < 0 || b < 0 || c < 0 || a >= nverts || b >= nverts || c >= nverts) continue;
+            if (a == b || b == c || c == a) continue;
+
+            tris.add(new int[]{a, b, c});
+            int faceId = faceNormals.size();
+            triFaceId.add(faceId);
+            vertFaces[a].add(faceId);
+            vertFaces[b].add(faceId);
+            vertFaces[c].add(faceId);
+
+            int ai = 3 * a, bi = 3 * b, ci = 3 * c;
+            float abx = pts[bi] - pts[ai], aby = pts[bi + 1] - pts[ai + 1], abz = pts[bi + 2] - pts[ai + 2];
+            float acx = pts[ci] - pts[ai], acy = pts[ci + 1] - pts[ai + 1], acz = pts[ci + 2] - pts[ai + 2];
+            float nx = aby * acz - abz * acy;
+            float ny = abz * acx - abx * acz;
+            float nz = abx * acy - aby * acx;
+            float len = (float)Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-7f) { nx /= len; ny /= len; nz /= len; }
+            else { nx = 0f; ny = 1f; nz = 0f; }
+            faceNormals.add(new float[]{nx, ny, nz});
+        }
+
+        if (tris.isEmpty()) return null;
+
+        int totalTris = tris.size();
+        int totalVerts = totalTris * 3;
+        float[] unrolledPts = new float[totalVerts * 3];
+        float[] unrolledUV = hasUV ? new float[totalVerts * 2] : null;
+        float[] baseUVs = hasUV ? new float[totalVerts * 2] : null;
+        float[] unrolledColors = hasColorNode ? new float[totalVerts * 4] : null;
+        int[] indices = new int[totalVerts];
+        int[] unrolledToOrigCoord = new int[totalVerts];
+
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (int i = 0; i + 2 < pts.length; i += 3) {
+            minX = Math.min(minX, pts[i]);   maxX = Math.max(maxX, pts[i]);
+            minY = Math.min(minY, pts[i + 1]); maxY = Math.max(maxY, pts[i + 1]);
+        }
+        float spanX = Math.max(maxX - minX, 1e-4f);
+        float spanY = Math.max(maxY - minY, 1e-4f);
+
+        int vK = 0, uvK = 0, colK = 0;
+        for (int t = 0; t < totalTris; t++) {
+            int[] tri = tris.get(t);
+            for (int corner = 0; corner < 3; corner++) {
+                int cIdx = tri[corner];
+                int vertIdx = t * 3 + corner;
+                unrolledToOrigCoord[vertIdx] = cIdx;
+
+                unrolledPts[vK++] = pts[3 * cIdx];
+                unrolledPts[vK++] = pts[3 * cIdx + 1];
+                unrolledPts[vK++] = pts[3 * cIdx + 2];
+
+                if (hasUV) {
+                    float u, v;
+                    if (uvs != null && cIdx * 2 + 1 < uvs.length) {
+                        u = uvs[2 * cIdx];
+                        v = uvs[2 * cIdx + 1];
+                    } else {
+                        u = (pts[3 * cIdx] - minX) / spanX;
+                        v = (pts[3 * cIdx + 1] - minY) / spanY;
+                    }
+                    baseUVs[uvK] = u;
+                    unrolledUV[uvK++] = u;
+                    baseUVs[uvK] = v;
+                    unrolledUV[uvK++] = v;
+                }
+
+                if (hasColorNode) {
+                    int clrIdx = cIdx;
+                    if (rawColors != null && clrIdx * colorStride + 2 < rawColors.length) {
+                        float[] rgb = ctx.displayColor(rawColors[clrIdx * colorStride],
+                                                       rawColors[clrIdx * colorStride + 1],
+                                                       rawColors[clrIdx * colorStride + 2]);
+                        unrolledColors[colK++] = rgb[0];
+                        unrolledColors[colK++] = rgb[1];
+                        unrolledColors[colK++] = rgb[2];
+                        unrolledColors[colK++] = (colorStride == 4) ? rawColors[clrIdx * colorStride + 3] : 1f;
+                    } else {
+                        unrolledColors[colK++] = 1f;
+                        unrolledColors[colK++] = 1f;
+                        unrolledColors[colK++] = 1f;
+                        unrolledColors[colK++] = 1f;
+                    }
+                }
+
+                indices[vertIdx] = vertIdx;
+            }
+        }
+
+        Object activeTT = protoArgs.get("_activeTextureTransform");
+        if (activeTT instanceof X3DAnariHandler.TextureTransformAnim && unrolledUV != null) {
+            AnariMath.applyTextureTransform(unrolledUV, (X3DAnariHandler.TextureTransformAnim) activeTT);
+        }
+
+        // IndexedTriangleSet does not require creaseAngle to define topology, but
+        // use it when X3DJSAIL exposes it so existing smooth-normal behavior is kept.
+        float creaseAngle = (float) X3DTypeAdapter.asDouble(its, "getCreaseAngle", 0.0);
+        float[] unrolledNormals = AnariMath.computeSmoothNormals(
+                pts, tris, triFaceId, faceNormals, vertFaces, creaseAngle, unrolledToOrigCoord);
+
+        MemorySegment vSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledPts);
+        Array1D vArray = ctx.device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL,
+                DataType.FLOAT32_VEC3, totalVerts);
+        vArray.commit();
+
+        MemorySegment iSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = ctx.device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL,
+                DataType.UINT32_VEC3, totalTris);
+        iArray.commit();
+
+        Geometry.Triangle geom = ctx.device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledNormals);
+        Array1D nArray = ctx.device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL,
+                DataType.FLOAT32_VEC3, totalVerts);
+        nArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+        ctx.keepAlive.add(nArray);
+
+        if (hasUV && unrolledUV != null) {
+            MemorySegment uvSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledUV);
+            Array1D uvArray = ctx.device.newArray1D(uvSeg, MemorySegment.NULL, MemorySegment.NULL,
+                    DataType.FLOAT32_VEC2, totalVerts);
+            uvArray.commit();
+            ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, uvArray);
+            ctx.keepAlive.add(uvArray);
+
+            if (activeTT instanceof X3DAnariHandler.TextureTransformAnim) {
+                X3DAnariHandler.TextureTransformAnim ttAnim = (X3DAnariHandler.TextureTransformAnim) activeTT;
+                X3DAnariHandler.TextureTransformBinding ttb = new X3DAnariHandler.TextureTransformBinding(
+                        ctx, ttAnim, geom, uvSeg, uvArray, baseUVs);
+                ctx.textureBindings.add(ttb);
+                ttb.apply(ctx.device);
+            }
+        }
+
+        if (hasColorNode && unrolledColors != null) {
+            MemorySegment cSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, unrolledColors);
+            Array1D cArray = ctx.device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL,
+                    DataType.FLOAT32_VEC4, totalVerts);
+            cArray.commit();
+            ctx.setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
+            ctx.keepAlive.add(cArray);
+        }
+
+        geom.commit();
+        ctx.keepAlive.add(vArray);
+        ctx.keepAlive.add(iArray);
+        ctx.keepAlive.add(geom);
+        ctx.addBounds(unrolledPts, m);
+
+        Object activeDispObj = protoArgs.get("_activeDisplacers");
+        if (activeDispObj instanceof List<?>) {
+            for (Object o : (List<?>) activeDispObj) {
+                if (o instanceof X3DAnariHandler.DisplacerAnim) {
+                    X3DAnariHandler.DisplacerAnim da = (X3DAnariHandler.DisplacerAnim) o;
+                    if (da.displacements != null && da.displacements.length > 0) {
+                        X3DAnariHandler.DisplacerMeshBinding binding = new X3DAnariHandler.DisplacerMeshBinding(
+                                da, geom, vArray, vSeg, nArray, nSeg, pts,
+                                unrolledToOrigCoord, tris, triFaceId, vertFaces, creaseAngle);
+                        ctx.activeBindings.add(binding);
+                    }
+                }
+            }
+        }
+
+        if (Boolean.TRUE.equals(protoArgs.get("_isSkin"))) {
+            X3DAnariHandler.SkinMeshBinding binding = ctx.createSkinBinding(
+                    geom, vArray, vSeg, nArray, nSeg, pts,
+                    unrolledToOrigCoord, tris, triFaceId, vertFaces, creaseAngle);
+            if (binding != null) ctx.skinBindings.add(binding);
+        }
+
+        return geom;
+    }
+}
+
 class AnariBox extends org.web3d.x3d.jsail.Geometry3D.Box implements AnariGeometry {
     private final org.web3d.x3d.jsail.Geometry3D.Box delegate;
 
@@ -2728,6 +2981,12 @@ class AnariNodeFactory {
         if (x3dGeom instanceof AnariGeometry) return (AnariGeometry) x3dGeom;
         if (x3dGeom instanceof org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet) {
             return new AnariIndexedFaceSet((org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet) x3dGeom);
+        }
+        // IndexedTriangleSet is a Rendering-component geometry node.  Keep this
+        // adapter reflection-friendly so generated X3DJSAIL programs from different
+        // library versions remain source-compatible while still using getIndex().
+        if (x3dGeom.getClass().getSimpleName().equals("IndexedTriangleSet")) {
+            return new AnariIndexedTriangleSet(x3dGeom);
         }
         if (x3dGeom instanceof org.web3d.x3d.jsail.Geometry3D.Box) {
             return new AnariBox((org.web3d.x3d.jsail.Geometry3D.Box) x3dGeom);

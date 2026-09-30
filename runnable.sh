@@ -1,7 +1,7 @@
-bash run.sh net/coderextreme/data/rubikOnFire.java
-bash run.sh net/coderextreme/data/KoreanCharacter01Jin.java
 bash run.sh net/coderextreme/data/JoeKickAnimation.java
 bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
+bash run.sh net/coderextreme/data/rubikOnFire.java
+bash run.sh net/coderextreme/data/KoreanCharacter01Jin.java
 bash run.sh net/coderextreme/data/JinWink.java
 bash run.sh net/coderextreme/data/BoxEm.java
 bash run.sh net/coderextreme/data/ArchHalf.java
