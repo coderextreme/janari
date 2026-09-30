@@ -544,6 +544,33 @@ class AnariContext {
         return SWAP_RED_BLUE ? new float[]{ b, g, r } : new float[]{ r, g, b };
     }
 
+    /**
+     * Deterministic color palette for X3D geometry that has no explicit
+     * Material/Color/ColorRGBA and whose texture could not be resolved.
+     * Explicit X3D colors and textures always take precedence.
+     */
+    float[] fallbackObjectColor(Object seed, boolean skin) {
+        if (skin) return displayColor(0.86f, 0.68f, 0.54f);
+
+        final float[][] palette = {
+            {0.90f, 0.24f, 0.20f}, // red
+            {0.96f, 0.55f, 0.16f}, // orange
+            {0.95f, 0.78f, 0.20f}, // gold
+            {0.34f, 0.78f, 0.36f}, // green
+            {0.18f, 0.72f, 0.82f}, // cyan
+            {0.22f, 0.42f, 0.88f}, // blue
+            {0.52f, 0.34f, 0.86f}, // violet
+            {0.82f, 0.32f, 0.68f}, // magenta
+            {0.16f, 0.70f, 0.58f}, // teal
+            {0.76f, 0.48f, 0.22f}  // copper
+        };
+
+        int hash = System.identityHashCode(seed);
+        int index = Math.floorMod(hash, palette.length);
+        float[] c = palette[index];
+        return displayColor(c[0], c[1], c[2]);
+    }
+
     void addBounds(float[] pts, float[] m) {
         for (int i = 0; i + 2 < pts.length; i += 3) {
             float x = pts[i], y = pts[i+1], z = pts[i+2];
@@ -882,6 +909,83 @@ class X3DTypeAdapter {
         return null;
     }
 
+    /**
+     * Extract TEXCOORD_0 point data from either a TextureCoordinate directly
+     * or an X3D MultiTextureCoordinate wrapper.  X3DJSAIL versions differ in
+     * whether getTexCoord()/getTexCoordList() returns the node, an MFNode, or
+     * a Java List, so do not assume a single concrete return type.
+     */
+    static float[] textureCoordinatePoints(Object tcNode) {
+        if (tcNode == null) return null;
+
+        // Direct TextureCoordinate / TextureCoordinateGenerator.
+        float[] direct = asFloatArray(tcNode, "getPoint");
+        if (direct != null && direct.length >= 2) return direct;
+
+        // MultiTextureCoordinate: prefer mapping=TEXCOORD_0, otherwise first
+        // usable TextureCoordinate.
+        for (String method : List.of("getTexCoord", "getTexCoordList", "getTextureCoordinate", "getTextureCoordinateList")) {
+            try {
+                Object value = tcNode.getClass().getMethod(method).invoke(tcNode);
+                float[] found = textureCoordinatePointsRecursive(value);
+                if (found != null) return found;
+            } catch (Exception ignored) {}
+        }
+        return textureCoordinatePointsRecursive(tcNode);
+    }
+
+    private static float[] textureCoordinatePointsRecursive(Object value) {
+        if (value == null) return null;
+        if (value instanceof List<?>) {
+            // First pass: explicitly mapped TEXCOORD_0.
+            for (Object item : (List<?>) value) {
+                float[] found = textureCoordinatePointsMapped(item, "TEXCOORD_0");
+                if (found != null) return found;
+            }
+            for (Object item : (List<?>) value) {
+                float[] found = textureCoordinatePointsRecursive(item);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        if (value instanceof Object[]) {
+            for (Object item : (Object[]) value) {
+                float[] found = textureCoordinatePointsMapped(item, "TEXCOORD_0");
+                if (found != null) return found;
+            }
+            for (Object item : (Object[]) value) {
+                float[] found = textureCoordinatePointsRecursive(item);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        float[] mapped = textureCoordinatePointsMapped(value, "TEXCOORD_0");
+        if (mapped != null) return mapped;
+        float[] direct = asFloatArray(value, "getPoint");
+        if (direct != null && direct.length >= 2) return direct;
+
+        // X3DJSAIL MFNode wrappers can expose their contained nodes through
+        // getArray()/getValue()/getNodes()/getChildren().
+        for (String m : List.of("getArray", "getValue", "getNodes", "getChildren", "getChildrenList")) {
+            try {
+                Object nested = value.getClass().getMethod(m).invoke(value);
+                if (nested != value) {
+                    float[] found = textureCoordinatePointsRecursive(nested);
+                    if (found != null) return found;
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static float[] textureCoordinatePointsMapped(Object node, String wantedMapping) {
+        if (node == null) return null;
+        String mapping = asString(node, "getMapping");
+        if (mapping != null && !mapping.isEmpty() && !wantedMapping.equalsIgnoreCase(mapping)) return null;
+        float[] points = asFloatArray(node, "getPoint");
+        return (points != null && points.length >= 2) ? points : null;
+    }
+
     static float[] parseVec3(Object val) {
         if (val == null) return null;
         if (val instanceof float[]) return (float[]) val;
@@ -951,7 +1055,23 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
 
             Object mat = (app == null) ? null : app.getClass().getMethod("getMaterial").invoke(app);
             mat = ctx.resolveUse(mat);
-            Object tex = (app == null) ? null : app.getClass().getMethod("getTexture").invoke(app);
+            Object tex = null;
+            if (app != null) {
+                try { tex = app.getClass().getMethod("getTexture").invoke(app); } catch (Exception ignored) {}
+            }
+            mat = ctx.resolveUse(mat);
+            // X3D 4 PhysicalMaterial stores the color image in baseTexture rather
+            // than Appearance.texture.  Keep the classic Appearance.texture path
+            // above, then fall back to PhysicalMaterial.baseTexture.
+            if (tex == null && mat != null) {
+                for (String tm : List.of("getBaseTexture", "getBaseTextureList", "getTexture")) {
+                    try {
+                        Object candidate = mat.getClass().getMethod(tm).invoke(mat);
+                        candidate = ctx.resolveUse(candidate);
+                        if (candidate != null) { tex = candidate; break; }
+                    } catch (Exception ignored) {}
+                }
+            }
             if (tex != null) {
                 String tDef = X3DTypeAdapter.asString(tex, "getDEF");
                 if (tDef != null && !tDef.trim().isEmpty()) ctx.defMap.putIfAbsent(tDef.replace("\"", "").trim(), tex);
@@ -1003,9 +1123,23 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
 
             if (mat != null) {
                 try { transparency = (float) X3DTypeAdapter.asDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
-                float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
+
+                // Classic X3D Material.
                 d = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
-                if (d == null || (d.length >= 3 && d[0] == 0f && d[1] == 0f && d[2] == 0f)) {
+
+                // X3D 4 PhysicalMaterial uses baseColor rather than diffuseColor.
+                if (d == null) {
+                    for (String cm : List.of("getBaseColor", "getBaseColorFactor", "getColor")) {
+                        d = X3DTypeAdapter.asFloatArray(mat, cm);
+                        if (d != null && d.length >= 3) break;
+                    }
+                }
+
+                // Emissive color is only a diffuse fallback for non-PhysicalMaterial
+                // nodes.  This prevents an emissive white value from washing out a
+                // textured/colored PhysicalMaterial when its image is unavailable.
+                if (d == null && !mat.getClass().getSimpleName().contains("PhysicalMaterial")) {
+                    float[] ec = X3DTypeAdapter.asFloatArray(mat, "getEmissiveColor");
                     if (ec != null && ec.length >= 3 && (ec[0] > 0f || ec[1] > 0f || ec[2] > 0f)) d = ec;
                 }
             }
@@ -1039,17 +1173,24 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 ctx.keepAlive.add(m);
                 material = m;
             } else {
+                // If there is no usable explicit material or texture, give each
+                // shape a stable saturated color instead of rendering the entire
+                // model white/gray.  X3D Color/ColorRGBA vertex colors still win
+                // because that branch is handled above.
                 if (d == null || (d.length >= 3 && (d[0] + d[1] + d[2] < 0.05f))) {
                     if (isSkin) {
-                        d = new float[]{ 0.85f, 0.72f, 0.62f };
-                    } else if (d == null) {
-                        d = new float[]{ 1f, 1f, 1f };
+                        d = new float[]{ 0.86f, 0.68f, 0.54f };
+                    } else {
+                        Object colorSeed = (app != null) ? app : x3dGeom;
+                        d = ctx.fallbackObjectColor(colorSeed, false);
                     }
                 }
 
-                if (mat != null || isSkin) {
-                    if (d == null) d = new float[]{ 1f, 1f, 1f };
-                    float[] c = ctx.displayColor(d[0], d[1], d[2]);
+                if (mat != null || isSkin || d != null) {
+                    if (d == null) d = new float[]{ 0.32f, 0.36f, 0.44f };
+                    float[] c = (d == null) ? new float[]{0.32f, 0.36f, 0.44f}
+                                            : ((d.length >= 3 && (isSkin || mat != null))
+                                               ? ctx.displayColor(d[0], d[1], d[2]) : d);
                     float opacity = Math.max(0f, Math.min(1f, 1f - transparency));
 
                     Material.Matte m = ctx.device.newMaterial(Material.SubType.MATTE);
@@ -1544,7 +1685,7 @@ class AnariIndexedFaceSet extends org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet 
         for (String method : List.of("getTexCoord", "getTexCoordList")) {
             try { tcNode = ctx.resolveUse(ifs.getClass().getMethod(method).invoke(ifs)); if (tcNode != null) break; } catch (Exception ignored) {}
         }
-        float[] uvs = (tcNode != null) ? X3DTypeAdapter.asFloatArray(tcNode, "getPoint") : null;
+        float[] uvs = (tcNode != null) ? X3DTypeAdapter.textureCoordinatePoints(tcNode) : null;
         boolean hasTexture = Boolean.TRUE.equals(protoArgs.get("_hasTexture"));
         boolean hasUV = (uvs != null && uvs.length >= 2) || hasTexture;
 
@@ -1726,7 +1867,12 @@ class AnariIndexedFaceSet extends org.web3d.x3d.jsail.Geometry3D.IndexedFaceSet 
             Array1D cArray = ctx.device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC4, totalVerts);
             cArray.commit();
             ctx.setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
-            ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, cArray);
+            // attribute0 is reserved for TEXCOORD_0.  Older code also installed
+            // vertex colors there, which silently replaced the UV stream whenever
+            // a textured mesh also contained a Color/ColorRGBA node.
+            if (!hasUV) {
+                ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, cArray);
+            }
             ctx.keepAlive.add(cArray);
         }
 
@@ -2130,7 +2276,7 @@ class AnariIndexedTriangleSet implements AnariGeometry {
                 if (tcNode != null) break;
             } catch (Exception ignored) {}
         }
-        float[] uvs = (tcNode != null) ? X3DTypeAdapter.asFloatArray(tcNode, "getPoint") : null;
+        float[] uvs = (tcNode != null) ? X3DTypeAdapter.textureCoordinatePoints(tcNode) : null;
         boolean hasTexture = Boolean.TRUE.equals(protoArgs.get("_hasTexture"));
         boolean hasUV = (uvs != null && uvs.length >= 2) || hasTexture;
 
@@ -3220,9 +3366,12 @@ class X3DAnariHandler extends AbstractHandler {
     }
 
     private void build(Device device) throws Throwable {
-        float[] gray = new float[]{ 0.8f, 0.8f, 0.8f };
-        if (AnariContext.SWAP_RED_BLUE) gray = new float[]{ gray[2], gray[1], gray[0] };
-        defaultMaterial = device.newMaterial(Material.SubType.MATTE).setColor(gray[0], gray[1], gray[2]);
+        // Neutral fallback for non-Shape geometry; Shapes receive the richer
+        // deterministic palette above when they lack explicit X3D colors.
+        float[] neutral = AnariContext.SWAP_RED_BLUE
+            ? new float[]{ 0.28f, 0.24f, 0.20f }
+            : new float[]{ 0.20f, 0.24f, 0.28f };
+        defaultMaterial = device.newMaterial(Material.SubType.MATTE).setColor(neutral[0], neutral[1], neutral[2]);
         defaultMaterial.commit();
         keepAlive.add(defaultMaterial);
 
