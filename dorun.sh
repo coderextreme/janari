@@ -123,7 +123,6 @@ bash run.sh net/coderextreme/data/forcenode.java
 bash run.sh net/coderextreme/data/variationalflowers2.java
 bash run.sh net/coderextreme/data/JohnJoint2.java
 bash run.sh net/coderextreme/data/JinChinRaiser.java
-bash run.sh net/coderextreme/data/CleanedYouClocks.java
 bash run.sh net/coderextreme/data/CameraShape.java
 bash run.sh net/coderextreme/data/indexedfacesetPixeltexture_whole.java
 bash run.sh net/coderextreme/data/JinLOA4scaled1joe06c.java
@@ -172,7 +171,6 @@ bash run.sh net/coderextreme/data/KoreanCharacter01Jin.java
 bash run.sh net/coderextreme/data/JinScaledV2L1LOA4Sites10h.java
 bash run.sh net/coderextreme/data/ThreeDTexture.java
 bash run.sh net/coderextreme/data/flower3.java
-bash run.sh net/coderextreme/data/ManyClocks.java
 bash run.sh net/coderextreme/data/JinLowerLipDepressor.java
 bash run.sh net/coderextreme/data/JinBrowLowerer.java
 bash run.sh net/coderextreme/data/arc3.java
