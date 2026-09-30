@@ -10,7 +10,8 @@ Install anari-java/ in this folder.
 To run:
 
 ```bash
-bash run.sh net/coderextreme/ArchHalf
-bash run.sh net/coderextreme/BoxEm
-bash run.sh net/coderextreme/JinWink
+bash runnable.sh
+bash run.sh net/coderextreme/data/ArchHalf
+bash run.sh net/coderextreme/data/BoxEm
+bash run.sh net/coderextreme/data/JinWink
 ````
