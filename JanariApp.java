@@ -1480,9 +1480,12 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
             }
 
             if (img == null) {
+                System.err.println("[texture] FAILED to load any of " + Arrays.toString(urls)
+                    + " (cwd=" + new File(".").getAbsolutePath() + ") - put the image in ./data, ../data or on the classpath");
                 ctx.textureCache.put(cacheKey, null);
                 return null;
             }
+            System.err.println("[texture] loaded " + firstUrl + " (" + img.getWidth() + "x" + img.getHeight() + ")");
 
             int width = img.getWidth(), height = img.getHeight();
             byte[] rgba = new byte[width * height * 4];
