@@ -1,9 +1,20 @@
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.geometry.VPos;
 import javafx.scene.Scene;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
+import javafx.scene.canvas.Canvas;
+import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.image.PixelReader;
+import javafx.scene.image.WritableImage;
+import javafx.scene.text.Font;
+import javafx.scene.text.FontPosture;
+import javafx.scene.text.FontWeight;
+import javafx.scene.text.TextAlignment;
+import javafx.scene.paint.Color;
+import javafx.scene.SnapshotParameters;
 
 import org.codeberg.anari.api.Array1D;
 import org.codeberg.anari.api.Array2D;
@@ -29,6 +40,7 @@ import org.web3d.x3d.jsail.NURBS.*;
 import org.web3d.x3d.jsail.EnvironmentalEffects.*;
 import org.web3d.x3d.jsail.Rendering.*;
 import org.web3d.x3d.jsail.Shape.*;
+import org.web3d.x3d.jsail.Text.*;
 import org.web3d.x3d.jsail.Texturing.*;
 
 import javax.imageio.ImageIO;
@@ -43,9 +55,10 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 public class JanariApp extends Application {
-    private static String modelName = "rubik";
+    private static String modelName = "HelloWorld";
 
     @Override
     public void start(Stage primaryStage) {
@@ -59,6 +72,7 @@ public class JanariApp extends Application {
                 which,
                 "net.coderextreme.data." + which,
                 "net.coderextreme." + which,
+                "net.coderextreme.data.HelloWorld",
                 "net.coderextreme.data.rubik",
                 "net.coderextreme.data.rubikOnFire"
             );
@@ -76,8 +90,8 @@ public class JanariApp extends Application {
             }
 
             if (roots == null) {
-                roots = new net.coderextreme.data.rubik();
-                modelName = "net.coderextreme.data.rubik";
+                roots = new net.coderextreme.data.HelloWorld();
+                modelName = "net.coderextreme.data.HelloWorld";
             }
 
             org.web3d.x3d.jsail.Core.X3D x3dModel = roots.getRootNodeList().get(0);
@@ -551,16 +565,16 @@ class AnariContext {
         if (skin) return displayColor(0.86f, 0.68f, 0.54f);
 
         final float[][] palette = {
-            {0.90f, 0.24f, 0.20f}, // red
-            {0.96f, 0.55f, 0.16f}, // orange
-            {0.95f, 0.78f, 0.20f}, // gold
-            {0.34f, 0.78f, 0.36f}, // green
-            {0.18f, 0.72f, 0.82f}, // cyan
-            {0.22f, 0.42f, 0.88f}, // blue
-            {0.52f, 0.34f, 0.86f}, // violet
-            {0.82f, 0.32f, 0.68f}, // magenta
-            {0.16f, 0.70f, 0.58f}, // teal
-            {0.76f, 0.48f, 0.22f}  // copper
+            {0.90f, 0.24f, 0.20f},
+            {0.96f, 0.55f, 0.16f},
+            {0.95f, 0.78f, 0.20f},
+            {0.34f, 0.78f, 0.36f},
+            {0.18f, 0.72f, 0.82f},
+            {0.22f, 0.42f, 0.88f},
+            {0.52f, 0.34f, 0.86f},
+            {0.82f, 0.32f, 0.68f},
+            {0.16f, 0.70f, 0.58f},
+            {0.76f, 0.48f, 0.22f}
         };
 
         int hash = System.identityHashCode(seed);
@@ -1228,21 +1242,9 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 return;
             }
 
-            Map<String, Object> geomArgs = new HashMap<>(protoArgs);
-            if (tex != null) geomArgs.put("_hasTexture", Boolean.TRUE);
-            if (ttAnim != null) geomArgs.put("_activeTextureTransform", ttAnim);
-
-            AnariGeometry anariGeom = AnariNodeFactory.adaptGeometry(x3dGeom);
-            if (anariGeom == null) return;
-
-            Geometry.Triangle geometry = anariGeom.buildGeometry(ctx, parentTransform, geomArgs);
-            if (geometry == null) return;
-
-            Material<?> material = ctx.defaultMaterial;
+            // Early resolve diffuse color so text geometries can inherit material color
             float[] d = null;
             float transparency = 0f;
-            boolean isSkin = Boolean.TRUE.equals(protoArgs.get("_isSkin"));
-
             if (mat != null) {
                 try { transparency = (float) X3DTypeAdapter.asDouble(mat, "getTransparency", 0.0); } catch (Exception ignored) {}
                 d = X3DTypeAdapter.asFloatArray(mat, "getDiffuseColor");
@@ -1260,16 +1262,44 @@ class AnariShape extends org.web3d.x3d.jsail.Shape.Shape implements AnariNode {
                 }
             }
 
+            Map<String, Object> geomArgs = new HashMap<>(protoArgs);
+            if (d != null) geomArgs.put("_diffuseColor", d);
+            if (tex != null) geomArgs.put("_hasTexture", Boolean.TRUE);
+            if (ttAnim != null) geomArgs.put("_activeTextureTransform", ttAnim);
+
+            AnariGeometry anariGeom = AnariNodeFactory.adaptGeometry(x3dGeom);
+            if (anariGeom == null) return;
+
+            Geometry.Triangle geometry = anariGeom.buildGeometry(ctx, parentTransform, geomArgs);
+            if (geometry == null) return;
+
+            Material<?> material = ctx.defaultMaterial;
+            boolean isSkin = Boolean.TRUE.equals(protoArgs.get("_isSkin"));
+
+            // Retrieve texture sampler OR procedural text sampler
             Sampler sampler = null;
             if (tex != null && tex.getClass().getSimpleName().contains("ImageTexture")) {
                 sampler = loadTextureSampler(ctx, tex);
+            } else if (geomArgs.containsKey("_textSampler")) {
+                sampler = (Sampler) geomArgs.get("_textSampler");
             }
 
-            if (sampler != null) {
+	    if (sampler != null) {
                 Material.Matte m = ctx.device.newMaterial(Material.SubType.MATTE);
                 m.setColor(1f, 1f, 1f);
                 ctx.setAnariObjectParameter(m, "color", DataType.SAMPLER, sampler);
-                if (transparency > 0.001f) {
+
+                // Opacity comes from the alpha channel of the RGBA sampler. A 1-channel
+                // sampler reads back as (v,0,0,1) in ANARI, i.e. alpha == 1, which made the
+                // transparent text background render opaque (black).
+                ctx.setAnariObjectParameter(m, "opacity", DataType.SAMPLER, sampler);
+
+                try {
+                    m.set("alphaMode", DataType.STRING, ctx.arena.allocateFrom("blend\0", StandardCharsets.UTF_8));
+                } catch (Throwable ignored) {}
+
+                // Don't overwrite the alpha sampler with a scalar for procedural text
+                if (transparency > 0.001f && !geomArgs.containsKey("_textSampler")) {
                     try { m.setFloat32("opacity", Math.max(0f, Math.min(1f, 1f - transparency))); } catch (Throwable ignored) {}
                 }
                 m.commit();
@@ -1775,7 +1805,6 @@ class AnariLineHelper {
         try {
             if (segments == null || segments.isEmpty()) return;
 
-            // Batch segments by color so they share geometries and materials
             Map<Integer, List<LineSegmentDef>> colorGroups = new LinkedHashMap<>();
             Map<Integer, float[]> colorMap = new HashMap<>();
 
@@ -2230,6 +2259,277 @@ class AnariIndexedLineSet extends org.web3d.x3d.jsail.Rendering.IndexedLineSet i
 }
 
 // ============================================================================
+// TEXT IMPLEMENTATION (PLANAR GLYPH TRIANGULATION WITH JUSTIFY & FONT STYLES)
+// ============================================================================
+
+class AnariText implements AnariGeometry {
+    private final Object delegate;
+
+    public AnariText(Object delegate) { this.delegate = delegate; }
+
+    private boolean hasColors = false;
+    @Override public boolean hasVertexColors() { return hasColors; }
+
+    /** Merge set texels into rectangles {x0, x1(excl), r0, r1(excl)}: horizontal runs, then identical runs on consecutive rows. */
+    static List<int[]> extractRects(boolean[] mask, int w, int h) {
+        List<int[]> rects = new ArrayList<>();
+        Map<Long, int[]> open = new HashMap<>();
+        for (int r = 0; r <= h; r++) {
+            Map<Long, int[]> next = new HashMap<>();
+            if (r < h) {
+                int base = r * w, x = 0;
+                while (x < w) {
+                    if (mask[base + x]) {
+                        int x0 = x;
+                        while (x < w && mask[base + x]) x++;
+                        long key = (((long) x0) << 32) | (long) x;
+                        int[] prev = open.remove(key);
+                        if (prev != null) { prev[3] = r + 1; next.put(key, prev); }
+                        else next.put(key, new int[]{ x0, x, r, r + 1 });
+                    } else x++;
+                }
+            }
+            rects.addAll(open.values());
+            open = next;
+        }
+        return rects;
+    }
+
+    @Override
+    public Geometry.Triangle buildGeometry(AnariContext ctx, float[] m, Map<String, Object> protoArgs) throws Throwable {
+        Object textNode = X3DTypeAdapter.unwrapNode(delegate);
+        if (textNode == null) return null;
+
+        // 1. Extract strings
+        List<?> strList = X3DTypeAdapter.getListFromNode(textNode, "getString", "getStringList");
+        if (strList.isEmpty()) return null;
+        List<String> lines = new ArrayList<>();
+        for (Object s : strList) lines.add(X3DTypeAdapter.cleanQuotes(String.valueOf(s)));
+
+        // 2. Extract FontStyle
+        Object fontStyle = null;
+        for (String fm : List.of("getFontStyle", "getFontStyleList")) {
+            try { fontStyle = textNode.getClass().getMethod(fm).invoke(textNode); if (fontStyle != null) break; } catch (Exception ignored) {}
+        }
+        fontStyle = ctx.resolveUse(fontStyle);
+
+        float size = (fontStyle != null) ? (float) X3DTypeAdapter.asDouble(fontStyle, "getSize", 1.0) : 1.0f;
+        float spacing = (fontStyle != null) ? (float) X3DTypeAdapter.asDouble(fontStyle, "getSpacing", 1.0) : 1.0f;
+        String style = (fontStyle != null) ? X3DTypeAdapter.asString(fontStyle, "getStyle") : "PLAIN";
+        String family = (fontStyle != null) ? X3DTypeAdapter.asString(fontStyle, "getFamily") : "SERIF";
+
+        FontWeight weight = (style != null && style.toUpperCase().contains("BOLD")) ? FontWeight.BOLD : FontWeight.NORMAL;
+        FontPosture posture = (style != null && style.toUpperCase().contains("ITALIC")) ? FontPosture.ITALIC : FontPosture.REGULAR;
+        String fxFamily = family != null && family.toUpperCase().contains("SANS") ? "SansSerif" : "Serif";
+
+        // High resolution for sharp ray-traced text
+        // Pixels per world unit: at least 256, but enough that glyphs raster at ~48px tall
+        // even for tiny FontStyle sizes (e.g. size 0.035 would otherwise be ~7px).
+        double ppi = Math.max(256.0, 48.0 / (Math.max(size, 1e-4) * 0.75));
+        double fxFontSize = size * ppi * 0.75;
+        Font fxFont = Font.font(fxFamily, weight, posture, fxFontSize);
+
+        // 3. Resolve text color from material diffuse color if provided
+        float[] dCol = (float[]) protoArgs.get("_diffuseColor");
+        Color textColor = Color.WHITE;
+        if (dCol != null && dCol.length >= 3) {
+            textColor = Color.color(
+                Math.max(0f, Math.min(1f, dCol[0])),
+                Math.max(0f, Math.min(1f, dCol[1])),
+                Math.max(0f, Math.min(1f, dCol[2]))
+            );
+        }
+
+        // 4. Justify
+        String[] justify = null;
+        if (fontStyle != null) {
+            for (String jm : List.of("getJustify", "getJustifyList", "getJustifyArray")) {
+                try {
+                    Object res = fontStyle.getClass().getMethod(jm).invoke(fontStyle);
+                    if (res instanceof String[]) { justify = (String[]) res; break; }
+                    if (res instanceof List<?>) {
+                        List<?> l = (List<?>) res;
+                        justify = new String[l.size()];
+                        for (int i = 0; i < l.size(); i++) justify[i] = String.valueOf(l.get(i));
+                        break;
+                    }
+                    if (res != null) {
+                        for (String sub : List.of("getArray", "getValue", "getStrings")) {
+                            try {
+                                Object r2 = res.getClass().getMethod(sub).invoke(res);
+                                if (r2 instanceof String[]) { justify = (String[]) r2; break; }
+                            } catch (Exception ignored) {}
+                        }
+                        if (justify != null) break;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        String majorJustify = (justify != null && justify.length >= 1) ? X3DTypeAdapter.cleanQuotes(justify[0]).toUpperCase() : "BEGIN";
+
+        // Measure text bounds
+        javafx.scene.text.Text helper = new javafx.scene.text.Text();
+        helper.setFont(fxFont);
+        double maxLineWidth = 0;
+        for (String line : lines) {
+            helper.setText(line);
+            maxLineWidth = Math.max(maxLineWidth, helper.getLayoutBounds().getWidth());
+        }
+        double lineHeight = fxFontSize * spacing;
+        double textHeight = lineHeight * lines.size();
+
+        int canvasW = Math.max(1, (int) Math.ceil(maxLineWidth + 64));
+        int canvasH = Math.max(1, (int) Math.ceil(textHeight + 64));
+
+        Canvas canvas = new Canvas(canvasW, canvasH);
+        GraphicsContext gc = canvas.getGraphicsContext2D();
+        gc.setFont(fxFont);
+        gc.setFill(textColor);
+        gc.setTextBaseline(VPos.CENTER);
+
+        double textX;
+        if ("MIDDLE".equals(majorJustify)) {
+            gc.setTextAlign(TextAlignment.CENTER);
+            textX = canvasW / 2.0;
+        } else if ("END".equals(majorJustify)) {
+            gc.setTextAlign(TextAlignment.RIGHT);
+            textX = canvasW - 32.0;
+        } else {
+            gc.setTextAlign(TextAlignment.LEFT);
+            textX = 32.0;
+        }
+
+        double startY = (canvasH - textHeight) / 2.0 + lineHeight * 0.5;
+        for (int i = 0; i < lines.size(); i++) {
+            gc.fillText(lines.get(i), textX, startY + i * lineHeight);
+        }
+
+        // 5. Thread-safe snapshot with transparent background
+        SnapshotParameters snapParams = new SnapshotParameters();
+        snapParams.setFill(Color.TRANSPARENT);
+
+        WritableImage snapshot;
+        if (Platform.isFxApplicationThread()) {
+            snapshot = canvas.snapshot(snapParams, null);
+        } else {
+            CompletableFuture<WritableImage> future = new CompletableFuture<>();
+            Platform.runLater(() -> {
+                try {
+                    future.complete(canvas.snapshot(snapParams, null));
+                } catch (Throwable t) {
+                    future.completeExceptionally(t);
+                }
+            });
+            snapshot = future.get();
+        }
+
+        PixelReader pr = snapshot.getPixelReader();
+        final int ALPHA_MIN = 48;
+        boolean[] glyph = new boolean[canvasW * canvasH];   // row 0 = bottom (ANARI V axis)
+        {
+            int gi = 0;
+            for (int y = canvasH - 1; y >= 0; y--)
+                for (int x = 0; x < canvasW; x++)
+                    glyph[gi++] = ((pr.getArgb(x, y) >>> 24) & 0xFF) >= ALPHA_MIN;
+        }
+
+        // Contrasting "background" colour for a thin halo around each glyph, so the
+        // foreground (text colour) and background (halo) are always distinguishable
+        // from each other and from the scene, while the rest of the quad stays empty.
+        float tr = (float) textColor.getRed(), tg = (float) textColor.getGreen(), tb = (float) textColor.getBlue();
+        float lum = 0.2126f * tr + 0.7152f * tg + 0.0722f * tb;
+        float[] haloCol = (lum > 0.5f) ? new float[]{ 0.04f, 0.04f, 0.04f } : new float[]{ 1f, 1f, 1f };
+
+        int R = Math.max(2, (int) Math.round(fxFontSize * 0.07));
+        boolean[] dil = glyph.clone();
+        {   // separable box dilation by R pixels
+            boolean[] tmp = new boolean[dil.length];
+            for (int y = 0; y < canvasH; y++) {
+                int base = y * canvasW;
+                for (int x = 0; x < canvasW; x++) {
+                    if (!glyph[base + x]) continue;
+                    for (int dx = Math.max(0, x - R); dx <= Math.min(canvasW - 1, x + R); dx++) tmp[base + dx] = true;
+                }
+            }
+            for (int x = 0; x < canvasW; x++) {
+                for (int y = 0; y < canvasH; y++) {
+                    if (!tmp[y * canvasW + x]) continue;
+                    for (int dy = Math.max(0, y - R); dy <= Math.min(canvasH - 1, y + R); dy++) dil[dy * canvasW + x] = true;
+                }
+            }
+        }
+        boolean[] ring = new boolean[dil.length];
+        for (int i = 0; i < ring.length; i++) ring[i] = dil[i] && !glyph[i];
+
+        List<int[]> glyphRects = AnariText.extractRects(glyph, canvasW, canvasH);
+        List<int[]> ringRects = AnariText.extractRects(ring, canvasW, canvasH);
+        System.err.println("[text] glyph rects=" + glyphRects.size() + " halo rects=" + ringRects.size()
+                + " canvas=" + canvasW + "x" + canvasH + " ppi=" + (int) ppi);
+        if (glyphRects.isEmpty()) return null;
+
+        float worldW = (float) (canvasW / ppi);
+        float worldH = (float) (canvasH / ppi);
+        float hw = worldW / 2f, hh = worldH / 2f;
+
+        int nq = glyphRects.size() + ringRects.size();
+        float[] verts = new float[nq * 4 * 3];
+        float[] normals = new float[nq * 4 * 3];
+        float[] colors = new float[nq * 4 * 4];
+        int[] indices = new int[nq * 4 * 3];
+        for (int q = 0; q < nq; q++) {
+            boolean isGlyph = q < glyphRects.size();
+            int[] rc = isGlyph ? glyphRects.get(q) : ringRects.get(q - glyphRects.size());
+            float x0 = -hw + (float) (rc[0] / ppi), x1 = -hw + (float) (rc[1] / ppi);
+            float y0 = -hh + (float) (rc[2] / ppi), y1 = -hh + (float) (rc[3] / ppi);
+            float[] px = { x0, y0, x1, y0, x1, y1, x0, y1 };
+            float cr = isGlyph ? tr : haloCol[0], cg = isGlyph ? tg : haloCol[1], cb = isGlyph ? tb : haloCol[2];
+            for (int c = 0; c < 4; c++) {
+                int vi = (q * 4 + c) * 3;
+                verts[vi] = px[c * 2];
+                verts[vi + 1] = px[c * 2 + 1];
+                normals[vi + 2] = 1f;
+                int ci = (q * 4 + c) * 4;
+                colors[ci] = cr; colors[ci + 1] = cg; colors[ci + 2] = cb; colors[ci + 3] = 1f;
+            }
+            int[] tri = { 0,1,2, 0,2,3,  0,2,1, 0,3,2 };   // front + back
+            for (int t = 0; t < 12; t++) indices[q * 12 + t] = q * 4 + tri[t];
+        }
+        int nv = nq * 4, ntri = nq * 4;
+
+        ctx.addBounds(verts, m);
+
+        MemorySegment vSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, verts);
+        Array1D vArray = ctx.device.newArray1D(vSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, nv);
+        vArray.commit();
+
+        MemorySegment iSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+        Array1D iArray = ctx.device.newArray1D(iSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.UINT32_VEC3, ntri);
+        iArray.commit();
+
+        Geometry.Triangle geom = ctx.device.newGeometry(Geometry.SubType.TRIANGLE)
+                .setVertexPosition(vArray)
+                .setPrimitiveIndex(iArray);
+
+        MemorySegment nSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, normals);
+        Array1D nArray = ctx.device.newArray1D(nSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC3, nv);
+        nArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.normal", DataType.ARRAY1D, nArray);
+
+        MemorySegment cSeg = ctx.arena.allocateFrom(ValueLayout.JAVA_FLOAT, colors);
+        Array1D cArray = ctx.device.newArray1D(cSeg, MemorySegment.NULL, MemorySegment.NULL, DataType.FLOAT32_VEC4, nv);
+        cArray.commit();
+        ctx.setAnariObjectParameter(geom, "vertex.color", DataType.ARRAY1D, cArray);
+        try { ctx.setAnariObjectParameter(geom, "vertex.attribute0", DataType.ARRAY1D, cArray); } catch (Throwable ignored) {}
+
+        geom.commit();
+        ctx.keepAlive.add(vArray); ctx.keepAlive.add(iArray); ctx.keepAlive.add(nArray); ctx.keepAlive.add(cArray); ctx.keepAlive.add(geom);
+        hasColors = true;
+        return geom;
+    }
+}
+
+
+// ============================================================================
 // NURBS PATCH SURFACE IMPLEMENTATION (DE BOOR EVALUATION & ANARI GEOMETRY)
 // ============================================================================
 
@@ -2322,7 +2622,6 @@ class AnariNurbsPatchSurface extends org.web3d.x3d.jsail.NURBS.NurbsPatchSurface
         int stepsV;
         if (vTess > 0) {
             stepsV = Math.max(vTess, 4);
-
         } else if (vTess < 0) {
             int spans = Math.max(1, vDimension - vOrder + 1);
             stepsV = Math.max(Math.abs(vTess) * spans, 4);
@@ -3208,10 +3507,13 @@ class AnariSphere extends org.web3d.x3d.jsail.Geometry3D.Sphere implements Anari
 
     @Override
     public Geometry.Triangle buildGeometry(AnariContext ctx, float[] m, Map<String, Object> protoArgs) throws Throwable {
-        float radius = (delegate != null) ? delegate.getRadius() : getRadius();
+        float radius = 1.0f;
+        try {
+            radius = (delegate != null) ? delegate.getRadius() : getRadius();
+        } catch (Exception ignored) {}
         if (radius <= 0f) radius = 1.0f;
 
-        int rings = 20, sectors = 32;
+        int rings = 36, sectors = 72;
         int nverts = (rings + 1) * (sectors + 1);
         float[] vertices = new float[nverts * 3];
         float[] normals = new float[nverts * 3];
@@ -3226,15 +3528,15 @@ class AnariSphere extends org.web3d.x3d.jsail.Geometry3D.Sphere implements Anari
 
             for (int s = 0; s <= sectors; s++) {
                 double theta = (double) s / sectors * (2.0 * Math.PI);
-                float nx = (float) (sinPhi * Math.cos(theta));
+                float nx = -(float) (sinPhi * Math.sin(theta));
                 float ny = (float) Math.cos(phi);
-                float nz = (float) (sinPhi * Math.sin(theta));
+                float nz = -(float) (sinPhi * Math.cos(theta));
 
-                vertices[vIdx] = radius * nx;
+                vertices[vIdx]     = radius * nx;
                 vertices[vIdx + 1] = y;
                 vertices[vIdx + 2] = radius * nz;
 
-                normals[vIdx] = nx;
+                normals[vIdx]     = nx;
                 normals[vIdx + 1] = ny;
                 normals[vIdx + 2] = nz;
                 vIdx += 3;
@@ -3335,15 +3637,16 @@ class AnariCylinder extends org.web3d.x3d.jsail.Geometry3D.Cylinder implements A
             for (int i = 0; i <= slices; i++) {
                 double theta = (double) i / slices * 2.0 * Math.PI;
                 float cos = (float) Math.cos(theta), sin = (float) Math.sin(theta);
-                float x = radius * cos, z = radius * sin;
+                float nx = -sin, nz = -cos;
+                float x = radius * nx, z = radius * nz;
                 float u = (float) i / slices;
 
                 vList.add(x); vList.add(-halfH); vList.add(z);
-                nList.add(cos); nList.add(0f); nList.add(sin);
+                nList.add(nx); nList.add(0f); nList.add(nz);
                 uvList.add(u); uvList.add(0f);
 
                 vList.add(x); vList.add(halfH); vList.add(z);
-                nList.add(cos); nList.add(0f); nList.add(sin);
+                nList.add(nx); nList.add(0f); nList.add(nz);
                 uvList.add(u); uvList.add(1f);
             }
             for (int i = 0; i < slices; i++) {
@@ -3618,15 +3921,21 @@ class AnariNodeFactory {
 
         if (cName.contains("Background")) return;
 
+        // Viewpoint positioning transformed by parent matrix to match FLIP_Y
         if (cName.contains("Viewpoint")) {
             if (!ctx.viewpointSet) {
                 try {
                     float[] pos = X3DTypeAdapter.asFloatArray(node, "getPosition");
+                    float[] cor = X3DTypeAdapter.asFloatArray(node, "getCenterOfRotation");
                     if (pos != null && pos.length >= 3) {
-                        float vy = AnariContext.FLIP_Y ? -pos[1] : pos[1];
-                        ctx.cameraTarget = new float[] { pos[0], vy, 0f };
-                        ctx.cameraDistance = Math.abs(pos[2]) > 0.001f ? Math.abs(pos[2])
-                                : (float) Math.sqrt(pos[0]*pos[0] + pos[1]*pos[1] + pos[2]*pos[2]);
+                        float[] tPos = AnariMath.transformPoint(parentTransform, pos[0], pos[1], pos[2]);
+                        float[] tCor = (cor != null && cor.length >= 3)
+                            ? AnariMath.transformPoint(parentTransform, cor[0], cor[1], cor[2])
+                            : tPos;
+                        ctx.cameraTarget = new float[] { tCor[0], tCor[1], tCor[2] };
+                        float dx = tPos[0] - tCor[0], dy = tPos[1] - tCor[1], dz = tPos[2] - tCor[2];
+                        float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                        ctx.cameraDistance = dist > 0.001f ? dist : 7f;
                         ctx.viewpointSet = true;
                     }
                 } catch (Exception ignored) {}
@@ -3642,7 +3951,6 @@ class AnariNodeFactory {
                 if (protoDecl != null) {
                     Map<String, Object> newArgs = new HashMap<>();
 
-                    // 1. Defaults from ProtoInterface
                     Object pInterface = null;
                     for (String m : List.of("getProtoInterface", "getInterface")) {
                         try { pInterface = protoDecl.getClass().getMethod(m).invoke(protoDecl); if (pInterface != null) break; } catch (Exception ignored) {}
@@ -3661,7 +3969,6 @@ class AnariNodeFactory {
                         }
                     }
 
-                    // 2. IS / connect
                     Object isNode = null;
                     for (String m : List.of("getIS", "getIs")) {
                         try { isNode = node.getClass().getMethod(m).invoke(node); if (isNode != null) break; } catch (Exception ignored) {}
@@ -3679,7 +3986,6 @@ class AnariNodeFactory {
                         }
                     }
 
-                    // 3. FieldValue overrides on this ProtoInstance
                     List<?> fvList = X3DTypeAdapter.getListFromNode(node, "getFieldValue", "getFieldValueList", "getFieldValues", "getFieldList");
                     for (Object fv : fvList) {
                         String fName = X3DTypeAdapter.asString(fv, "getName");
@@ -3690,7 +3996,6 @@ class AnariNodeFactory {
                         }
                     }
 
-                    // 4. Traverse ProtoBody
                     Object pBody = null;
                     for (String m : List.of("getProtoBody", "getBody")) {
                         try { pBody = protoDecl.getClass().getMethod(m).invoke(protoDecl); if (pBody != null) break; } catch (Exception ignored) {}
@@ -3789,6 +4094,9 @@ class AnariNodeFactory {
         }
         if (x3dGeom instanceof org.web3d.x3d.jsail.Geometry3D.Extrusion) {
             return new AnariExtrusion((org.web3d.x3d.jsail.Geometry3D.Extrusion) x3dGeom);
+        }
+        if (x3dGeom instanceof org.web3d.x3d.jsail.Text.Text || x3dGeom.getClass().getSimpleName().equals("Text")) {
+            return new AnariText(x3dGeom);
         }
         return null;
     }
@@ -4051,7 +4359,12 @@ class X3DAnariHandler extends AbstractHandler {
             AnariNodeFactory.traverseList(context, sceneChildren, identity, new HashMap<>());
         }
 
-        if (context.bmin[0] <= context.bmax[0]) {
+        if (context.viewpointSet) {
+            cameraTarget = context.cameraTarget;
+            cameraDistance = context.cameraDistance;
+            cameraAzimuth = 0f;
+            cameraElevation = 0f;
+        } else if (context.bmin[0] <= context.bmax[0]) {
             float cx = (context.bmin[0] + context.bmax[0]) / 2;
             float cy = (context.bmin[1] + context.bmax[1]) / 2;
             float cz = (context.bmin[2] + context.bmax[2]) / 2;
@@ -4059,19 +4372,13 @@ class X3DAnariHandler extends AbstractHandler {
             float dy = context.bmax[1] - context.bmin[1];
             float dz = context.bmax[2] - context.bmin[2];
             float radius = 0.5f * (float) Math.sqrt(dx*dx + dy*dy + dz*dz);
-            if (!context.viewpointSet) {
-                cameraTarget = new float[] { cx, cy, cz };
-                cameraDistance = Math.max(radius * 2.5f, 1f);
-            } else {
-                cameraTarget = context.cameraTarget;
-                cameraDistance = context.cameraDistance;
-            }
+            cameraTarget = new float[] { cx, cy, cz };
+            cameraDistance = Math.max(radius * 2.5f, 1f);
+            cameraAzimuth = 0.45f;
+            cameraElevation = 0.30f;
         }
 
         angleScale = Math.abs(cameraElevation) > 1.6f ? (float) (Math.PI / 180.0) : 1f;
-        // Set an isometric-like perspective angle so the 3D cube structure is immediately visible
-        cameraAzimuth = 0.45f;
-        cameraElevation = 0.30f;
 
         if (renderer != null) {
             try {

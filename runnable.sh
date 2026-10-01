@@ -1,3 +1,6 @@
+bash run.sh net/coderextreme/data/HelloWorldCommented.java
+bash run.sh net/coderextreme/data/HelloWorld.java
+bash run.sh net/coderextreme/data/HelloWorldMinimal.java
 bash run.sh net/coderextreme/data/mobius.java
 bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
 bash run.sh net/coderextreme/data/JoeKickAnimation.java
@@ -11,7 +14,6 @@ bash run.sh net/coderextreme/data/rubikFurnace.java
 bash run.sh net/coderextreme/data/rubik.java
 bash run.sh net/coderextreme/data/rubikPly.java
 exit
-bash run.sh net/coderextreme/data/HalloweenPumpkinLanternKnight.java
 bash run.sh net/coderextreme/data/HAnimBehaviorPrototypes.java
 bash run.sh net/coderextreme/data/HAnimModelFootLeft.java
 bash run.sh net/coderextreme/data/HAnimModelFootRight.java
@@ -20,9 +22,6 @@ bash run.sh net/coderextreme/data/HAnimModelHandRight.java
 bash run.sh net/coderextreme/data/HAnimPoseExample.java
 bash run.sh net/coderextreme/data/HAnimPoseExternProtoDeclare.java
 bash run.sh net/coderextreme/data/HAnimPosePrototype.java
-bash run.sh net/coderextreme/data/HelloWorldCommented.java
-bash run.sh net/coderextreme/data/HelloWorld.java
-bash run.sh net/coderextreme/data/HelloWorldMinimal.java
 bash run.sh net/coderextreme/data/Humanoid0.java
 bash run.sh net/coderextreme/data/Humanoid1.java
 bash run.sh net/coderextreme/data/Humanoid1NoSegSite.java
